@@ -1,6 +1,3 @@
-> [!WARNING]
-> This repository has been merged to the [main one](https://github.com/slopus/happy). All issues and code is now living there.
-
 # Happy Server
 
 Minimal backend for open-source end-to-end encrypted Claude Code clients.
@@ -25,11 +22,65 @@ Happy Server is the synchronization backbone for secure Claude Code clients. It 
 
 Your Claude Code clients generate encryption keys locally and use Happy Server as a secure relay. Messages are end-to-end encrypted before leaving your device. The server's job is simple: store encrypted blobs and sync them between your devices in real-time.
 
-## Hosting
+## Self-Hosting
 
-**You don't need to self-host!** Our free cloud Happy Server at `happy-api.slopus.com` is just as secure as running your own. Since all data is end-to-end encrypted before it reaches our servers, we literally cannot read your messages even if we wanted to. The encryption happens on your device, and only you have the keys.
+### Prerequisites
 
-That said, Happy Server is open source and self-hostable if you prefer running your own infrastructure. The security model is identical whether you use our servers or your own.
+- Docker + Docker Compose
+- A domain name with DNS pointed at your server
+- A reverse proxy (Caddy, nginx, etc.) for HTTPS
+
+### Setup
+
+1. **Clone and create your env file:**
+
+   ```bash
+   git clone https://github.com/thenemal/happy-server
+   cd happy-server
+   cp .env.example .env   # then fill in the values
+   ```
+
+2. **Generate secrets** and populate `.env`:
+
+   ```
+   HANDY_MASTER_SECRET=<openssl rand -hex 32>
+   POSTGRES_PASSWORD=<openssl rand -hex 16>
+   MINIO_ROOT_USER=minioadmin
+   MINIO_ROOT_PASSWORD=<openssl rand -hex 16>
+   ```
+
+   > **Keep `HANDY_MASTER_SECRET` safe** — it's used to derive all encryption keys. Losing it means losing access to all stored tokens.
+
+3. **Start the stack:**
+
+   ```bash
+   docker compose up -d
+   ```
+
+   This starts happy-server (port 3005), PostgreSQL, Redis, and MinIO (port 9000). Database migrations run automatically on startup.
+
+4. **Reverse proxy config** (Caddy example):
+
+   ```
+   your-domain.com {
+       reverse_proxy localhost:3005
+   }
+
+   files.your-domain.com {
+       reverse_proxy localhost:9000
+   }
+   ```
+
+   Set `S3_PUBLIC_URL=https://files.your-domain.com/happy` in your `.env` to match.
+
+5. **Point the Happy app** at `https://your-domain.com`.
+
+### Updating
+
+```bash
+git pull
+docker compose up -d --build
+```
 
 ## License
 
