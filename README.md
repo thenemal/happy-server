@@ -22,6 +22,24 @@ Happy Server is the synchronization backbone for secure Claude Code clients. It 
 
 Your Claude Code clients generate encryption keys locally and use Happy Server as a secure relay. Messages are end-to-end encrypted before leaving your device. The server's job is simple: store encrypted blobs and sync them between your devices in real-time.
 
+## Connecting
+
+This instance is live at **`https://home8.compagnie-lily.org`**.
+
+### Happy mobile app
+
+Settings → **Relay Server URL** → set to `https://home8.compagnie-lily.org`
+
+### Happy CLI
+
+```bash
+export HAPPY_SERVER_URL=https://home8.compagnie-lily.org
+```
+
+Or add it to your shell profile to make it permanent.
+
+---
+
 ## Self-Hosting
 
 ### Prerequisites
