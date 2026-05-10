@@ -30,13 +30,34 @@ This instance is live at **`https://home8.compagnie-lily.org`**.
 
 Settings → **Relay Server URL** → set to `https://home8.compagnie-lily.org`
 
+### Happy web app
+
+Go to `https://app.happy.engineering/server`, set the relay URL to `https://home8.compagnie-lily.org` (no trailing slash), then authenticate.
+
 ### Happy CLI
 
 ```bash
-export HAPPY_SERVER_URL=https://home8.compagnie-lily.org
+export HAPPY_SERVER_URL=https://home8.compagnie-lily.org happy auth login
 ```
 
-Or add it to your shell profile to make it permanent.
+Add to your shell profile to make it permanent:
+
+```bash
+echo 'export HAPPY_SERVER_URL=https://home8.compagnie-lily.org' >> ~/.bashrc
+```
+
+> **Always set `HAPPY_SERVER_URL` before `happy auth login`** — if it's not set, auth registers against the default upstream server and the web/mobile pairing won't find the request on your server.
+
+### Linux: fix for "Process exited unexpectedly" (glibc systems)
+
+The happy npm package bundles a musl Claude Code binary for Linux. On glibc systems (Debian, Ubuntu, most LXC containers), the bundled binary is missing and remote sessions crash. Fix by symlinking your system `claude` to the expected path:
+
+```bash
+sudo ln -sf ~/.local/bin/claude \
+  /usr/local/lib/node_modules/happy/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl/claude
+```
+
+Run once after `npm install -g happy` or after any happy upgrade.
 
 ---
 

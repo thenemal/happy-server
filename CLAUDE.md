@@ -2,6 +2,67 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## What is happy-server?
+
+This repo is the **relay backend** for the [Happy](https://github.com/slopus/happy) ecosystem — an open-source tool that lets you control Claude Code remotely from mobile/web. It is the self-hosted equivalent of `https://api.cluster-fluster.com`.
+
+### Ecosystem overview
+
+```
+Mobile App (iOS/Android) / Web (app.happy.engineering)
+         ↕  end-to-end encrypted
+    happy-server  ← this repo, running at https://home8.compagnie-lily.org
+         ↕
+    happy daemon (on dev machine) → wraps `claude` / Claude Code
+```
+
+### Client components (separate from this repo)
+
+| Component | Install | Purpose |
+|---|---|---|
+| `happy` CLI | `npm i -g happy` | Wraps `claude`/`codex`; shows QR to link mobile/web; runs the local daemon |
+| `happy-agent` CLI | `npm i -g happy-agent` | Scripted remote control — spawn sessions, send messages, wait for completion |
+| Mobile app | iOS / Android stores | View and control sessions remotely; approve permissions; get push notifications |
+| Web app | `app.happy.engineering` | Same as mobile but in browser |
+
+### Connecting clients to this server
+
+**CLI** — always set `HAPPY_SERVER_URL` before auth, or sessions register against the default upstream:
+```bash
+export HAPPY_SERVER_URL=https://home8.compagnie-lily.org
+happy auth login
+```
+
+Add to `~/.bashrc` to make permanent.
+
+**Mobile app** — Settings → Relay Server URL → `https://home8.compagnie-lily.org`
+
+**Web app** — go to `https://app.happy.engineering/server`, enter `https://home8.compagnie-lily.org` (no trailing slash), then authenticate.
+
+### Linking a machine for the first time
+
+1. Set `HAPPY_SERVER_URL` then run `happy auth login --force`
+2. Copy the terminal connect URL and paste it in the web app (already set to your server), or scan QR with mobile
+3. Approve the connection — the CLI receives a token and all future sessions are visible in web/mobile
+
+### Known gotchas
+
+- **Trailing slash in web app server URL** — causes `//v1/...` double-slash 404s. Enter URL without trailing slash.
+- **`HAPPY_SERVER_URL` not set before auth** — CLI registers keypair on the default server; web/mobile (pointing at yours) can't find the auth request. Always set the env var first.
+- **`ai-permission-hook` is active** — tool permissions are auto-resolved server-side; the web/mobile "Permissions shown in terminal only" banner is expected and harmless.
+- **"Process exited unexpectedly" on Linux glibc** — happy bundles a musl Claude binary that doesn't exist on Debian/Ubuntu/LXC. Fix once after install: `sudo ln -sf ~/.local/bin/claude /usr/local/lib/node_modules/happy/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl/claude`
+
+### Known API version gaps (fixed)
+
+The happy-server codebase can lag behind the CLI/app client versions. Symptoms: `404` on endpoints the clients call. Fixed so far:
+
+| Endpoint | Added | Why needed |
+|---|---|---|
+| `GET /v3/sessions/:id/messages?after_seq&limit` | 2026-05-09 | CLI v1.1.8+ uses HTTP polling instead of WebSocket for message fetch |
+| `POST /v3/sessions/:id/messages` | 2026-05-09 | CLI v1.1.8+ uses HTTP batch insert instead of WebSocket `message` event |
+
+If a future CLI upgrade breaks messaging again, check server logs for 404s on `/v3/` or `/v4/` endpoints and add them to `sessionRoutes.ts`.
+
 ## Commands
 
 - `yarn build` — TypeScript type-check (no emit; `tsc --noEmit`)

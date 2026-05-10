@@ -1,11 +1,11 @@
-import { eventRouter, buildNewSessionUpdate } from "@/app/events/eventRouter";
+import { eventRouter, buildNewSessionUpdate, buildNewMessageUpdate } from "@/app/events/eventRouter";
 import { type Fastify } from "../types";
 import { db } from "@/storage/db";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { log } from "@/utils/log";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
-import { allocateUserSeq } from "@/storage/seq";
+import { allocateUserSeq, allocateSessionSeq } from "@/storage/seq";
 import { sessionDelete } from "@/app/session/sessionDelete";
 
 export function sessionRoutes(app: Fastify) {
@@ -352,6 +352,115 @@ export function sessionRoutes(app: Fastify) {
                 updatedAt: v.updatedAt.getTime()
             }))
         });
+    });
+
+    // V3 Messages API - GET with after_seq pagination
+    app.get('/v3/sessions/:sessionId/messages', {
+        schema: {
+            params: z.object({ sessionId: z.string() }),
+            querystring: z.object({
+                after_seq: z.coerce.number().int().min(0).default(0),
+                limit: z.coerce.number().int().min(1).max(500).default(100)
+            })
+        },
+        preHandler: app.authenticate
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { sessionId } = request.params;
+        const { after_seq, limit } = request.query;
+
+        const session = await db.session.findFirst({ where: { id: sessionId, accountId: userId } });
+        if (!session) {
+            return reply.code(404).send({ error: 'Session not found' });
+        }
+
+        const messages = await db.sessionMessage.findMany({
+            where: { sessionId, seq: { gt: after_seq } },
+            orderBy: { seq: 'asc' },
+            take: limit + 1,
+            select: { id: true, seq: true, localId: true, content: true, createdAt: true, updatedAt: true }
+        });
+
+        const hasMore = messages.length > limit;
+        const result = hasMore ? messages.slice(0, limit) : messages;
+
+        return reply.send({
+            messages: result.map(m => ({
+                id: m.id,
+                seq: m.seq,
+                content: m.content,
+                localId: m.localId,
+                createdAt: m.createdAt.getTime(),
+                updatedAt: m.updatedAt.getTime()
+            })),
+            hasMore
+        });
+    });
+
+    // V3 Messages API - POST batch insert
+    app.post('/v3/sessions/:sessionId/messages', {
+        schema: {
+            params: z.object({ sessionId: z.string() }),
+            body: z.object({
+                messages: z.array(z.object({
+                    content: z.string(),
+                    localId: z.string()
+                }))
+            })
+        },
+        preHandler: app.authenticate
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { sessionId } = request.params;
+        const { messages } = request.body;
+
+        const session = await db.session.findFirst({ where: { id: sessionId, accountId: userId } });
+        if (!session) {
+            return reply.code(404).send({ error: 'Session not found' });
+        }
+
+        const created: { id: string; seq: number; localId: string | null; createdAt: number; updatedAt: number }[] = [];
+
+        for (const msg of messages) {
+            const existing = await db.sessionMessage.findFirst({
+                where: { sessionId, localId: msg.localId }
+            });
+            if (existing) {
+                created.push({
+                    id: existing.id,
+                    seq: existing.seq,
+                    localId: existing.localId,
+                    createdAt: existing.createdAt.getTime(),
+                    updatedAt: existing.updatedAt.getTime()
+                });
+                continue;
+            }
+
+            const updSeq = await allocateUserSeq(userId);
+            const msgSeq = await allocateSessionSeq(sessionId);
+            const msgContent: PrismaJson.SessionMessageContent = { t: 'encrypted', c: msg.content };
+
+            const saved = await db.sessionMessage.create({
+                data: { sessionId, seq: msgSeq, content: msgContent, localId: msg.localId }
+            });
+
+            const updatePayload = buildNewMessageUpdate(saved, sessionId, updSeq, randomKeyNaked(12));
+            eventRouter.emitUpdate({
+                userId,
+                payload: updatePayload,
+                recipientFilter: { type: 'all-interested-in-session', sessionId }
+            });
+
+            created.push({
+                id: saved.id,
+                seq: saved.seq,
+                localId: saved.localId,
+                createdAt: saved.createdAt.getTime(),
+                updatedAt: saved.updatedAt.getTime()
+            });
+        }
+
+        return reply.send({ messages: created });
     });
 
     // Delete session
