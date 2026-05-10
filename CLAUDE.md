@@ -56,10 +56,14 @@ Add to `~/.bashrc` to make permanent.
 The `happy` daemon runs as a systemd service (`/etc/systemd/system/happy.service`). It starts automatically on boot — no need to run `happy` manually.
 
 ```bash
-systemctl status happy          # check it's running
+systemctl status happy          # check it's running (shows active (exited) — normal for Type=oneshot)
 systemctl restart happy         # restart after config changes
-journalctl -u happy -f          # live logs
+happy daemon status             # check daemon is actually running with PID/port
+happy daemon stop               # stop the daemon manually
+journalctl -u happy             # service start/stop logs
 ```
+
+Service is `Type=oneshot RemainAfterExit=yes` with `ExecStart=happy daemon start` / `ExecStop=happy daemon stop`. The daemon itself manages its own process; systemd just triggers start/stop on boot/shutdown.
 
 **First-time auth only:** run `happy auth login` manually once (credentials saved to `~/.config/happy/`). After that the service starts headlessly.
 
