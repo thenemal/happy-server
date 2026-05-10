@@ -51,6 +51,18 @@ Add to `~/.bashrc` to make permanent.
 
 **Why this order:** mobile authenticates first (creates the canonical account). The web app then uses `AccountAuthRequest` — it generates a QR, mobile approves it, and web gets a token for mobile's account. Doing it the other way (web first, or `happy auth login` QR scanned by web) leaves web and mobile on separate accounts with no shared sessions.
 
+### Auto-starting the daemon on boot
+
+The `happy` daemon runs as a systemd service (`/etc/systemd/system/happy.service`). It starts automatically on boot — no need to run `happy` manually.
+
+```bash
+systemctl status happy          # check it's running
+systemctl restart happy         # restart after config changes
+journalctl -u happy -f          # live logs
+```
+
+**First-time auth only:** run `happy auth login` manually once (credentials saved to `~/.config/happy/`). After that the service starts headlessly.
+
 ### Known gotchas
 
 - **Trailing slash in web app server URL** — causes `//v1/...` double-slash 404s. Enter URL without trailing slash.
