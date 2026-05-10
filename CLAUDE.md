@@ -41,9 +41,15 @@ Add to `~/.bashrc` to make permanent.
 
 ### Linking a machine for the first time
 
-1. Set `HAPPY_SERVER_URL` then run `happy auth login --force`
-2. Copy the terminal connect URL and paste it in the web app (already set to your server), or scan QR with mobile
-3. Approve the connection — the CLI receives a token and all future sessions are visible in web/mobile
+**Correct order — mobile first, then web:**
+
+1. Set `HAPPY_SERVER_URL` on the dev machine, then run `happy auth login --force`
+2. **Mobile:** set Relay Server URL → `https://home8.compagnie-lily.org`, then log in and scan the QR from the CLI
+3. **Web:** go to `https://app.happy.engineering`, hit "New Session" — it shows a QR and tells you to go to mobile
+4. **Mobile:** open Happy account settings → "Add Device" → scan the web app's QR
+5. Web is now on the same account as mobile; all sessions visible in both
+
+**Why this order:** mobile authenticates first (creates the canonical account). The web app then uses `AccountAuthRequest` — it generates a QR, mobile approves it, and web gets a token for mobile's account. Doing it the other way (web first, or `happy auth login` QR scanned by web) leaves web and mobile on separate accounts with no shared sessions.
 
 ### Known gotchas
 
