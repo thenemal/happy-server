@@ -84,7 +84,7 @@ The happy-server codebase can lag behind the CLI/app client versions. Symptoms: 
 | `POST /v3/sessions/:id/messages` | 2026-05-09 | CLI v1.1.8+ uses HTTP batch insert instead of WebSocket `message` event |
 | `DELETE /v1/machines/:id` | 2026-05-12 | App sends delete when user removes an old machine |
 
-If a future CLI upgrade breaks messaging again, check server logs for 404s on `/v3/` or `/v4/` endpoints and add them to `sessionRoutes.ts`.
+**When pulling upstream happy-server updates:** these endpoints are local patches not in upstream. Re-check they still exist after any `git pull` from the upstream repo — they may have been added upstream (great, remove the patch) or silently lost (re-apply from this commit history). Check server logs for 404s if the app misbehaves after an upgrade.
 
 ## Commands
 
