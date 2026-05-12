@@ -34,10 +34,13 @@ Settings → **Relay Server URL** → set to `https://home8.compagnie-lily.org`
 
 Go to `https://app.happy.engineering/server`, set the relay URL to `https://home8.compagnie-lily.org` (no trailing slash), then authenticate.
 
+> A trailing slash causes double-slash URLs (`//v1/...`) that return 404 on every API call.
+
 ### Happy CLI
 
 ```bash
-export HAPPY_SERVER_URL=https://home8.compagnie-lily.org happy auth login
+export HAPPY_SERVER_URL=https://home8.compagnie-lily.org
+happy auth login
 ```
 
 Add to your shell profile to make it permanent:
@@ -115,6 +118,47 @@ happy
 ```
 
 The machine only appears in the mobile app's session list once `happy` is running with no arguments. `happy auth login` alone registers credentials but does not create a visible machine.
+
+### 5 — (Optional) Auto-start on boot with systemd
+
+To have the happy daemon start automatically on boot, create a systemd service:
+
+```ini
+# /etc/systemd/system/happy.service
+[Unit]
+Description=Happy daemon
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=<your-user>
+Environment=HAPPY_SERVER_URL=https://home8.compagnie-lily.org
+ExecStart=happy daemon start
+ExecStop=happy daemon stop
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+systemctl daemon-reload
+systemctl enable --now happy
+systemctl status happy          # shows "active (exited)" — normal for Type=oneshot
+happy daemon status             # confirm the daemon is actually running with PID/port
+```
+
+Auth credentials are saved to `~/.config/happy/` on first login and reused on subsequent starts — no interactive login needed at boot.
+
+### 6 — Adding the web app to the same account
+
+**Do this after** mobile is working. The web app links to an existing mobile account — it does not create its own account.
+
+1. Go to `https://app.happy.engineering`, hit "New Session" — the web app shows a QR
+2. On mobile: open Happy account settings → **Add Device** → scan the web app's QR
+3. Web is now on the same account as mobile; all sessions are visible in both
+
+> **Why this order matters:** mobile creates the canonical account. The web app uses an `AccountAuthRequest` flow — it generates a QR, mobile approves it, and web receives a token for mobile's account. If you authenticate web independently (or scan the web QR with the CLI instead of mobile), web and mobile end up on separate accounts with no shared sessions.
 
 ### Diagnosing a stalled auth
 
