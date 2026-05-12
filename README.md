@@ -61,6 +61,74 @@ Run once after `npm install -g happy` or after any happy upgrade.
 
 ---
 
+## Setting up a new client machine (VM/LXC)
+
+Full playbook for getting a new dev machine connected to this server.
+
+### Prerequisites
+
+- Node.js + npm
+- `claude` CLI already installed (happy wraps it)
+- DNS for `home8.compagnie-lily.org` must resolve from the new host — verify before anything else:
+  ```bash
+  getent hosts home8.compagnie-lily.org
+  ```
+
+### 1 — Install happy CLI
+
+```bash
+npm install -g happy-coder
+happy --version   # sanity check
+```
+
+### 2 — Set server URL persistently
+
+Add to `~/.bashrc` (not just the current shell):
+
+```bash
+echo 'export HAPPY_SERVER_URL=https://home8.compagnie-lily.org' >> ~/.bashrc
+source ~/.bashrc
+echo $HAPPY_SERVER_URL   # must print the URL
+```
+
+> This must be in the shell rc file. Setting it ad-hoc in one terminal and opening a new tmux pane silently loses it — happy falls back to the default upstream server and auth stalls with no error.
+
+### 3 — Authenticate
+
+```bash
+happy auth login --force
+```
+
+- Pick **Mobile App**
+- **Before scanning the QR**, tail the server log and confirm `POST /v1/auth/request` appears — if nothing shows up, the CLI is still hitting the default upstream, not your server:
+  ```bash
+  # on the botnificent host:
+  docker compose logs happy-server -f
+  ```
+- Mobile app's **Relay Server URL** must be `https://home8.compagnie-lily.org` — same URL as the CLI. Verify this on mobile **before** scanning, not after.
+- Scan the QR, approve on phone → CLI prints "Authentication successful" + machine ID.
+
+### 4 — Start a session
+
+```bash
+happy
+```
+
+The machine only appears in the mobile app's session list once `happy` is running with no arguments. `happy auth login` alone registers credentials but does not create a visible machine.
+
+### Diagnosing a stalled auth
+
+Work through this order before touching Caddy or the proxy:
+
+1. Mobile app Relay Server URL == `$HAPPY_SERVER_URL` on the CLI (verify both sides)
+2. `$HAPPY_SERVER_URL` is in `~/.bashrc`, not just the current shell
+3. Tail server logs while the QR is on screen — `POST /v1/auth/request` must appear immediately; if it doesn't, the request is going to the wrong server
+4. Only if steps 1–3 are confirmed, investigate the proxy
+
+> **Note on WebSocket testing:** Happy uses Socket.IO (EIO=4 handshake). A bare `curl` with `Upgrade: websocket` will return an empty reply — that's normal, not a proxy error. Don't diagnose Caddy based on raw WebSocket curl tests.
+
+---
+
 ## Self-Hosting
 
 ### Prerequisites
