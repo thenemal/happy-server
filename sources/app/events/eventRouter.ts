@@ -135,6 +135,9 @@ export type UpdateEvent = {
     type: 'delete-session';
     sessionId: string;
 } | {
+    type: 'delete-machine';
+    machineId: string;
+} | {
     type: 'relationship-updated';
     uid: string;
     status: 'none' | 'requested' | 'pending' | 'friend' | 'rejected';
@@ -476,6 +479,18 @@ export function buildUpdateMachineUpdate(machineId: string, updateSeq: number, u
             machineId,
             metadata,
             daemonState
+        },
+        createdAt: Date.now()
+    };
+}
+
+export function buildDeleteMachineUpdate(machineId: string, updateSeq: number, updateId: string): UpdatePayload {
+    return {
+        id: updateId,
+        seq: updateSeq,
+        body: {
+            t: 'delete-machine',
+            machineId
         },
         createdAt: Date.now()
     };

@@ -6,6 +6,8 @@ import { log } from "@/utils/log";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { allocateUserSeq } from "@/storage/seq";
 import { buildNewMachineUpdate, buildUpdateMachineUpdate } from "@/app/events/eventRouter";
+import { machineDelete } from "@/app/session/machineDelete";
+import { Context } from "@/context";
 
 export function machinesRoutes(app: Fastify) {
     app.post('/v1/machines', {
@@ -172,6 +174,27 @@ export function machinesRoutes(app: Fastify) {
                 updatedAt: machine.updatedAt.getTime()
             }
         };
+    });
+
+    // DELETE /v1/machines/:id - Delete a machine
+    app.delete('/v1/machines/:id', {
+        preHandler: app.authenticate,
+        schema: {
+            params: z.object({
+                id: z.string()
+            })
+        }
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { id } = request.params;
+
+        const deleted = await machineDelete(Context.create(userId), id);
+
+        if (!deleted) {
+            return reply.code(404).send({ error: 'Machine not found' });
+        }
+
+        return reply.code(204).send();
     });
 
 }
