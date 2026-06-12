@@ -67,6 +67,20 @@ Service is `Type=oneshot RemainAfterExit=yes` with `ExecStart=happy daemon start
 
 **First-time auth only:** run `happy auth login` manually once (credentials saved to `~/.config/happy/`). After that the service starts headlessly.
 
+#### Orphaned-session RAM leak + the `ExecStartPre` reaper (#4)
+
+Remote sessions spawned by the daemon (`happy … claude --started-by daemon`) **never exit on their own**. When the daemon restarts/upgrades (boot, `systemctl restart happy`, `npm i -g happy`), the **new daemon does not adopt the old daemon's sessions** — `happy daemon list` reports *"started by a previous version of the daemon"* while `happy doctor` still lists them under "Daemon-Spawned Sessions". They become orphans (60–250 MB each + child `claude`) that keep pinging the relay (so their `Session.active` stays `true` and the server's 10-min `startTimeout` never reaps them) until killed by hand. This is a **happy CLI/daemon** bug, not a relay bug — a server-side `active=false` flag cannot kill an OS process on the client. Tracked upstream (all open in 1.1.8): `slopus/happy` #948, #721, #1189, #989, #442; the inner crash is the musl `"Process exited unexpectedly"` (#31/#1343).
+
+**Mitigation in place** — a systemd drop-in reaps orphans on every (re)start, before the fresh daemon comes up:
+
+```ini
+# /etc/systemd/system/happy.service.d/reap-orphans.conf
+[Service]
+ExecStartPre=-/bin/sh -c 'timeout 30 /usr/local/bin/happy doctor clean </dev/null >/dev/null 2>&1 || true'
+```
+
+At `ExecStartPre` time the new daemon isn't running yet, so every `--started-by daemon` process is by definition an orphan → safe to `happy doctor clean`. Guards: `timeout 30` (can't hang boot) + `</dev/null` (EOF any prompt) + `|| true` + leading `-` (rc ignored). This only fires **at restart** — it does not reap orphans that pile up *between* restarts. A periodic reaper (systemd timer / cron) is the planned follow-up; until then, `happy doctor clean` is the manual command (kills **all** happy processes — run when nothing is mid-flight). After editing the drop-in: `systemctl daemon-reload`.
+
 ### Known gotchas
 
 - **Trailing slash in web app server URL** — causes `//v1/...` double-slash 404s. Enter URL without trailing slash.
