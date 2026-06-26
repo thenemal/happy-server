@@ -65,11 +65,17 @@ journalctl -u happy             # service start/stop logs
 
 Service is `Type=oneshot RemainAfterExit=yes` with `ExecStart=happy daemon start` / `ExecStop=happy daemon stop`. The daemon itself manages its own process; systemd just triggers start/stop on boot/shutdown.
 
+Two drop-ins customize the unit (`/etc/systemd/system/happy.service.d/`):
+- `env-sandbox.conf` → `[Service]\nEnvironment=IS_SANDBOX=1` — **required** so daemon-spawned sessions can run as root (see the root-guard gotcha below). Spawned `claude` processes inherit the daemon's env.
+- `reap-orphans.conf` → the `ExecStartPre` orphan reaper (see below).
+
+After editing either: `systemctl daemon-reload && systemctl restart happy`.
+
 **First-time auth only:** run `happy auth login` manually once (credentials saved to `~/.config/happy/`). After that the service starts headlessly.
 
 #### Orphaned-session RAM leak + the `ExecStartPre` reaper (#4)
 
-Remote sessions spawned by the daemon (`happy … claude --started-by daemon`) **never exit on their own**. When the daemon restarts/upgrades (boot, `systemctl restart happy`, `npm i -g happy`), the **new daemon does not adopt the old daemon's sessions** — `happy daemon list` reports *"started by a previous version of the daemon"* while `happy doctor` still lists them under "Daemon-Spawned Sessions". They become orphans (60–250 MB each + child `claude`) that keep pinging the relay (so their `Session.active` stays `true` and the server's 10-min `startTimeout` never reaps them) until killed by hand. This is a **happy CLI/daemon** bug, not a relay bug — a server-side `active=false` flag cannot kill an OS process on the client. Tracked upstream (all open in 1.1.8): `slopus/happy` #948, #721, #1189, #989, #442; the inner crash is the musl `"Process exited unexpectedly"` (#31/#1343).
+Remote sessions spawned by the daemon (`happy … claude --started-by daemon`) **never exit on their own**. When the daemon restarts/upgrades (boot, `systemctl restart happy`, `npm i -g happy`), the **new daemon does not adopt the old daemon's sessions** — `happy daemon list` reports *"started by a previous version of the daemon"* while `happy doctor` still lists them under "Daemon-Spawned Sessions". They become orphans (60–250 MB each + child `claude`) that keep pinging the relay (so their `Session.active` stays `true` and the server's 10-min `startTimeout` never reaps them) until killed by hand. This is a **happy CLI/daemon** bug, not a relay bug — a server-side `active=false` flag cannot kill an OS process on the client. Tracked upstream (still open as of 1.1.10): `slopus/happy` #948, #721, #1189, #989, #442. (Separately, the *"Process exited unexpectedly"* / instant-exit symptom #31/#1343 was **not** a musl issue at all — it's the root-guard problem fixed via `IS_SANDBOX=1`; see Known gotchas. Orphans are the opposite failure: sessions that *do* run and never exit.)
 
 **Mitigation in place** — a systemd drop-in reaps orphans on every (re)start, before the fresh daemon comes up:
 
@@ -86,7 +92,10 @@ At `ExecStartPre` time the new daemon isn't running yet, so every `--started-by 
 - **Trailing slash in web app server URL** — causes `//v1/...` double-slash 404s. Enter URL without trailing slash.
 - **`HAPPY_SERVER_URL` not set before auth** — CLI registers keypair on the default server; web/mobile (pointing at yours) can't find the auth request. Always set the env var first.
 - **`ai-permission-hook` is active** — tool permissions are auto-resolved server-side; the web/mobile "Permissions shown in terminal only" banner is expected and harmless.
-- **"Process exited unexpectedly" on Linux glibc** — happy bundles a musl Claude binary that doesn't exist on Debian/Ubuntu/LXC. Fix once after install: `sudo ln -sf ~/.local/bin/claude /usr/local/lib/node_modules/happy/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl/claude`
+- **"Process exited unexpectedly" / daemon sessions die instantly (root guard)** — the daemon runs as **root** in this LXC, and the happy SDK spawns claude with `--permission-mode bypassPermissions` (→ `--dangerously-skip-permissions`). Claude Code refuses that as root: `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`, so every daemon-spawned session exits code 1 the moment it tries to think. **Fix:** tell Claude Code it's in a container by setting `IS_SANDBOX=1` in the daemon's systemd environment (drop-in below) — this lifts the root guard. Legitimate here: we *are* in an LXC, and remote-session permissions are handled by happy + `ai-permission-hook`, not interactively. Confirm with `systemctl show happy -p Environment` (should list `IS_SANDBOX=1`).
+  - **Diagnosing a fresh variant:** the SDK swallows claude's stderr. To capture the exact failing argv + stderr, shim the bundled binary — `cd /usr/local/lib/node_modules/happy/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64 && mv claude claude.real`, replace `claude` with a `#!/bin/bash` wrapper that appends `"$*"` to a logfile and `exec`s `claude.real "$@" 2> >(tee -a logfile >&2)`, send a message from mobile, read the log, then `mv -f claude.real claude`.
+  - **The old musl-symlink workaround is obsolete** — as of CLI 1.1.10 / agent-sdk 0.3.193 there is **no** `claude-agent-sdk-linux-x64-musl` package; the SDK ships a working glibc binary at `…/claude-agent-sdk-linux-x64/claude` (it even prefers the native-installer claude). Do **not** re-create that symlink; the real fix is `IS_SANDBOX=1`.
+- **Two happy installs / npm-prefix trap** — on this box `which happy` → `/usr/local/bin/happy` → `/usr/local/lib/node_modules/happy`, but `npm prefix -g` is `/usr` (so `npm i -g happy` writes to `/usr/lib/node_modules/happy`, an **off-PATH** copy that has no effect). Always upgrade the active copy with `npm i -g --prefix /usr/local happy`, then verify `happy --version`. The stray `/usr/lib` copy can be removed with `npm rm -g --prefix /usr happy`.
 
 ### Known API version gaps (fixed)
 
@@ -99,6 +108,8 @@ The happy-server codebase can lag behind the CLI/app client versions. Symptoms: 
 | `DELETE /v1/machines/:id` | 2026-05-12 | App sends delete when user removes an old machine |
 
 **When pulling upstream happy-server updates:** these endpoints are local patches not in upstream. Re-check they still exist after any `git pull` from the upstream repo — they may have been added upstream (great, remove the patch) or silently lost (re-apply from this commit history). Check server logs for 404s if the app misbehaves after an upgrade.
+
+**Client compatibility:** verified 2026-06-26 against happy CLI **1.1.10** (the `slopus/happy-server` relay repo itself has had no new commits since 2026-02-13, so there was nothing to pull — only the *client* moved). The 1.1.10 daemon polls `GET /v3/sessions/:id/messages` and returns 200 against this server — the v3 patch above is still needed and still works.
 
 ## Commands
 
