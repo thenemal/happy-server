@@ -158,7 +158,18 @@ journalctl -u happy-health           # see restarts the watchdog performed
 
 #### Orphaned-session RAM leak + the `ExecStartPre` reaper (#4)
 
-Remote sessions spawned by the daemon (`happy … claude --started-by daemon`) **never exit on their own**. When the daemon restarts/upgrades (boot, `systemctl restart happy`, `npm i -g happy`), the **new daemon does not adopt the old daemon's sessions** — `happy daemon list` reports *"started by a previous version of the daemon"* while `happy doctor` still lists them under "Daemon-Spawned Sessions". They become orphans (60–250 MB each + child `claude`) that keep pinging the relay (so their `Session.active` stays `true` and the server's 10-min `startTimeout` never reaps them) until killed by hand. This is a **happy CLI/daemon** bug, not a relay bug — a server-side `active=false` flag cannot kill an OS process on the client. Tracked upstream (still open as of 1.1.10): `slopus/happy` #948, #721, #1189, #989, #442. (Separately, the *"Process exited unexpectedly"* / instant-exit symptom #31/#1343 was **not** a musl issue at all — it's the root-guard problem fixed via `IS_SANDBOX=1`; see Known gotchas. Orphans are the opposite failure: sessions that *do* run and never exit.)
+Remote sessions spawned by the daemon (`happy … claude --started-by daemon`) **never exit on their own**. When the daemon restarts/upgrades (boot, `systemctl restart happy`, `npm i -g happy`), the **new daemon does not adopt the old daemon's sessions** — `happy daemon list` reports *"started by a previous version of the daemon"* while `happy doctor` still lists them under "Daemon-Spawned Sessions". They become orphans (60–250 MB each + child `claude`) that keep pinging the relay (so their `Session.active` stays `true` and the server's 10-min `startTimeout` never reaps them) until killed by hand. This is a **happy CLI/daemon** bug, not a relay bug — a server-side `active=false` flag cannot kill an OS process on the client. Tracked upstream, **all still open as of 1.2.0 / 2026-08-18**: `slopus/happy` #948, #721, #1189, #989, #442. (#989, *"daemon socket silently dies — no liveness probe or reconnection"*, is essentially the upstream twin of the boot-race outage above; `happy-health.timer` is our local answer to it.)
+
+**Measured cost of one upgrade (2026-08-18).** Upgrading 1.1.10 → 1.2.0 orphaned two sessions in under ten minutes — `happy daemon list` returned the telltale *"No active sessions this daemon is aware of (they might have been started by a previous version of the daemon)"* while `ps` showed them alive:
+
+| PID | Age | RSS |
+|---|---|---|
+| 2492190 (+ child `claude` 2492213) | 8m | 150 MB + 294 MB |
+| 2495847 | 5m | 141 MB |
+
+**~585 MB stranded by a single `npm i -g`.** Combined with the disk finding below, that is the concrete argument for a periodic reaper rather than a restart-only one.
+
+⚠️ **This also leaks disk, not just RAM.** On 2026-08-18 `/root/.happy/logs` had reached 1.3 GB, and the five largest logs (1.15 GB) were orphans that had been writing for **five to six weeks** — filenames dated Jun 26 / Jul 12 / Jul 19, all with an mtime of the Aug 2 reboot that finally killed them. An orphan's cost is its RSS *plus* an unbounded log for as long as it survives. Those logs also contain live `Authorization: Bearer` tokens, so treat them as credentials. See `happy-logprune.timer` above and issue #4. (Separately, the *"Process exited unexpectedly"* / instant-exit symptom #31/#1343 was **not** a musl issue at all — it's the root-guard problem fixed via `IS_SANDBOX=1`; see Known gotchas. Orphans are the opposite failure: sessions that *do* run and never exit.)
 
 **Mitigation in place** — a systemd drop-in reaps orphans on every (re)start, before the fresh daemon comes up:
 
@@ -168,7 +179,13 @@ Remote sessions spawned by the daemon (`happy … claude --started-by daemon`) *
 ExecStartPre=-/bin/sh -c 'timeout 30 /usr/local/bin/happy doctor clean </dev/null >/dev/null 2>&1 || true'
 ```
 
-At `ExecStartPre` time the new daemon isn't running yet, so every `--started-by daemon` process is by definition an orphan → safe to `happy doctor clean`. Guards: `timeout 30` (can't hang boot) + `</dev/null` (EOF any prompt) + `|| true` + leading `-` (rc ignored). This only fires **at restart** — it does not reap orphans that pile up *between* restarts. A periodic reaper (systemd timer / cron) is the planned follow-up; until then, `happy doctor clean` is the manual command (kills **all** happy processes — run when nothing is mid-flight). After editing the drop-in: `systemctl daemon-reload`.
+At `ExecStartPre` time the new daemon isn't running yet, so every `--started-by daemon` process is by definition an orphan → safe to `happy doctor clean`. Guards: `timeout 30` (can't hang boot) + `</dev/null` (EOF any prompt) + `|| true` + leading `-` (rc ignored).
+
+✅ **Verified working 2026-08-18** — a `systemctl restart happy` after the 1.2.0 upgrade cleared both real orphans (the ~585 MB above) and reparented the daemon into `/system.slice/happy.service`; both `ExecStartPre` steps returned `status=0` (check with `systemctl show happy -p ExecStartPre`).
+
+⚠️ **An `npm i -g` upgrade leaves the daemon outside systemd.** The version-mismatch self-restart spawns it from *your shell's* session scope, so it ends up in `/user.slice/…/session-N.scope` rather than the unit. Always follow an upgrade with `systemctl restart happy` — which conveniently reaps the orphans the upgrade just created. Confirm with `ps -o cgroup= -p <pid>` (want `/system.slice/happy.service`).
+
+This only fires **at restart** — it does not reap orphans that pile up *between* restarts. The liveness watchdog does **not** cover this: during the 1.2.0 upgrade the daemon was alive and healthy the whole time; it was the *sessions* that leaked. A periodic reaper (systemd timer / cron) is the planned follow-up; until then, `happy doctor clean` is the manual command (kills **all** happy processes — run when nothing is mid-flight). After editing the drop-in: `systemctl daemon-reload`.
 
 ### Known gotchas
 
@@ -190,9 +207,21 @@ The happy-server codebase can lag behind the CLI/app client versions. Symptoms: 
 | `POST /v3/sessions/:id/messages` | 2026-05-09 | CLI v1.1.8+ uses HTTP batch insert instead of WebSocket `message` event |
 | `DELETE /v1/machines/:id` | 2026-05-12 | App sends delete when user removes an old machine |
 
-**When pulling upstream happy-server updates:** these endpoints are local patches not in upstream. Re-check they still exist after any `git pull` from the upstream repo — they may have been added upstream (great, remove the patch) or silently lost (re-apply from this commit history). Check server logs for 404s if the app misbehaves after an upgrade.
+#### ⚠️ The upstream relay is archived — these patches are permanent
 
-**Client compatibility:** verified 2026-06-26 against happy CLI **1.1.10** (the `slopus/happy-server` relay repo itself has had no new commits since 2026-02-13, so there was nothing to pull — only the *client* moved). The 1.1.10 daemon polls `GET /v3/sessions/:id/messages` and returns 200 against this server — the v3 patch above is still needed and still works.
+**`slopus/happy-server` was archived on 2026-02-14**, one day after its final commit (`922a62f`, 2026-02-13). It is read-only and will never receive another commit. Verified 2026-08-18: `git fetch upstream && git log HEAD..upstream/main` → **0 commits**.
+
+So the older advice to "re-check after a `git pull`, they may have been added upstream" is **moot** — the endpoints above will never appear upstream, and no upstream fix for anything will ever arrive. They are ours to maintain permanently.
+
+The consequence worth internalizing: **the client keeps moving and the server is frozen, so drift is one-directional and structural.** `slopus/happy` (the CLI) is very much alive — pushed 2026-08-10, 23k stars. Every future CLI release is a chance for a new endpoint to 404 against this relay, and the only possible fix is a local patch. Check server logs for 404s after any client upgrade.
+
+Two gotchas when checking upstream from this repo:
+- **`gh` targets the wrong repo by default here.** With both `origin` (`thenemal/happy-server`) and `upstream` (`slopus/happy-server`) remotes, `gh` prefers `upstream` — so a bare `gh issue create` silently tries the *archived* repo and fails with "Repository was archived so is read-only". Pinned via `git config remote.origin.gh-resolved base`; verify with `gh repo view --json nameWithOwner`.
+- **`happy --version` is misleading** — it passes through to Claude Code and prints *that* version. For the real CLI version use `node -p "require('/usr/local/lib/node_modules/happy/package.json').version"`, or read `startedWithCliVersion` from `happy daemon status`.
+
+**Client compatibility:** verified 2026-08-18 against happy CLI **1.2.0** (upgraded from 1.1.10 that day). Before upgrading, the API surface of both tarballs was diffed rather than assumed: **9 base endpoints and 7 constructed sub-routes, identical in both** — including the patched `v3/sessions/:id/messages` — and the same `@anthropic-ai/claude-agent-sdk` constraint (`^0.3.179`). Post-upgrade the daemon registers, holds its WebSocket, and the relay answers 200. The v3 patch is still needed and still works.
+
+Note 1.2.0 was published to **npm only** — GitHub releases stop at `cli-1.1.10`, so there are no changelog notes for it. Diffing the tarball is the only reliable pre-upgrade check. To repeat it: `npm pack happy@<ver>`, unpack, then `grep -rhoE "/v[0-9]+/[a-zA-Z0-9/_.:-]+" dist | sort -u` against the installed copy's `dist`.
 
 ## Commands
 
