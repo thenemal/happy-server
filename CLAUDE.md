@@ -65,13 +65,96 @@ journalctl -u happy             # service start/stop logs
 
 Service is `Type=oneshot RemainAfterExit=yes` with `ExecStart=happy daemon start` / `ExecStop=happy daemon stop`. The daemon itself manages its own process; systemd just triggers start/stop on boot/shutdown.
 
-Two drop-ins customize the unit (`/etc/systemd/system/happy.service.d/`):
+⚠️ **`systemctl status happy` is not a liveness check** — see the boot-race section below. Always confirm with `happy daemon status`.
+
+Three drop-ins customize the unit (`/etc/systemd/system/happy.service.d/`, applied in filename order):
 - `env-sandbox.conf` → `[Service]\nEnvironment=IS_SANDBOX=1` — **required** so daemon-spawned sessions can run as root (see the root-guard gotcha below). Spawned `claude` processes inherit the daemon's env.
 - `reap-orphans.conf` → the `ExecStartPre` orphan reaper (see below).
+- `wait-for-relay.conf` → `After=/Wants=docker.service` + an `ExecStartPre` readiness probe (see below).
 
-After editing either: `systemctl daemon-reload && systemctl restart happy`.
+After editing any of them: `systemctl daemon-reload && systemctl restart happy`.
 
-**First-time auth only:** run `happy auth login` manually once (credentials saved to `~/.config/happy/`). After that the service starts headlessly.
+**First-time auth only:** run `happy auth login` manually once (credentials saved to `~/.happy/` — `access.key` plus `settings.json`; note there is **no** `~/.config/happy/` on this box). After that the service starts headlessly.
+
+#### Boot race: daemon dies before Docker is up, systemd never notices (fix activated 2026-08-18)
+
+> **Status — activated and partially verified 2026-08-18.**
+>
+> Verified live:
+> - daemon runs in `/system.slice/happy.service` (confirmed via `/proc/<pid>/cgroup`) — not a stray session scope
+> - readiness probe resolves correctly: `Starting` → `Daemon started successfully` took **5s** (the empty-`$URL` regression would take 5 min — that timing *is* the test)
+> - both timers scheduled (`systemctl list-timers 'happy-*'`)
+> - watchdog negative path: fired with the daemon healthy, finished in 2s, correctly did **not** restart
+> - watchdog positive path, end to end (`happy daemon stop` → `systemctl start happy-health`):
+>   ```
+>   03:46:09  happy-health starts
+>   03:46:11  "happy daemon not running - restarting happy.service"
+>   03:46:11  happy-health Finished        <- returned immediately...
+>   03:46:16  Daemon started successfully  <- ...while the restart was still running
+>   ```
+>   That 5-second gap is also the proof `--no-block` works: a blocking restart would have left the two units waiting on each other.
+>
+> ⚠️ Still unverified:
+> - **the boot race itself** — needs a real reboot to prove the `After=docker.service` ordering holds. This is the original bug; everything above only proves the machinery around it.
+> - **`happy-logprune.timer`** has not yet fired (first run 00:00 daily)
+
+**The outage:** the machine showed offline in the app for 13 days (2026-08-05 → 2026-08-18) while `systemctl status happy` reported `active (exited)` the entire time. The relay was healthy throughout — all four containers up, local and public both 200. Only the client daemon was dead.
+
+**Two independent defects, both required:**
+
+1. **Ordering.** At the Aug 5 reboot `happy.service` started at `02:43:48`, one second *before* `docker.service` at `02:43:49`. The relay wasn't listening, so the daemon's machine registration hung and died 60s later:
+   ```
+   [02:45:29] [DAEMON RUN][FATAL] AxiosError: timeout of 60000ms exceeded
+              POST https://home8.compagnie-lily.org/v1/machines  (ECONNABORTED)
+   [02:45:30] [DAEMON RUN] Process exiting with code: 1
+   ```
+2. **systemd is structurally blind to this daemon dying.** `happy daemon start` **forks and returns 0**, so `ExecStart` succeeds even as the child exits 1. With `Type=oneshot RemainAfterExit=yes` the unit then reports `active (exited)` forever. **`Restart=on-failure` would not have helped** — there is no failure for systemd to see. That is why 60 seconds of transient became 13 days of silence.
+
+**Fix — ordering alone is not sufficient.** `After=docker.service` only guarantees dockerd is up, which is *not* the same as the happy-server container being past `prisma migrate deploy`, nor Caddy routing. The daemon talks to the **public** URL, so the probe polls that — one request covers DNS, Caddy and happy-server together:
+
+```ini
+# /etc/systemd/system/happy.service.d/wait-for-relay.conf
+[Unit]
+After=docker.service
+Wants=docker.service
+
+[Service]
+ExecStartPre=/bin/sh -c 'for i in $$(seq 1 60); do \
+  curl -sf -o /dev/null --max-time 5 https://home8.compagnie-lily.org && exit 0; sleep 5; done; exit 0'
+```
+
+Bounded at 60×5s = 5 min and always exits 0 — a permanently-down relay must not block boot.
+
+⚠️ **Two systemd-specific traps in that one line — don't "clean them up":**
+- **The URL is hardcoded deliberately.** systemd runs its *own* expansion over `ExecStartPre` before `/bin/sh` sees the string (single quotes do not prevent this), and it does **not** support `${VAR:-default}`. Writing `${HAPPY_SERVER_URL:-https://…}` makes systemd look for a variable literally named `HAPPY_SERVER_URL:-https://…`, find nothing, and substitute **empty** — `curl ""` then fails all 60 times and burns the full 5 minutes on every boot before starting the daemon anyway, i.e. the original race merely delayed. Note this is invisible to shell-level testing: an interactive shell has `HAPPY_SERVER_URL` exported from `.bashrc`, so the test can never fail.
+- **`$$(seq …)`, not `$(seq …)`** — `$$` is how a literal `$` survives systemd's expansion.
+
+**Timing is the cheap way to tell whether the probe resolved:** with the relay up, `systemctl restart happy` should return in well under a second. If it hangs ~5 minutes, the URL expanded to empty.
+
+**Plus a detection path**, because ordering only fixes *this* trigger while systemd stays blind to the daemon dying from any other cause. `happy-health.timer` → `happy-health.service` runs every 5 min (first at `OnBootSec=3min`) and restarts `happy.service` if the daemon is gone. It matches on the `"Daemon is running"` string rather than an exit code, since the CLI's status exit codes are not a contract (`"Daemon is not running"` correctly fails the match).
+
+⚠️ **The health timer is liveness-only by design.** It must **never** run `happy doctor clean` on a schedule — that kills *all* happy processes including live sessions mid-flight. The selective orphan reaper remains the separate #4 follow-up. (It does reap orphans as a side effect when it fires, since restarting the unit runs the existing `reap-orphans` `ExecStartPre` — but only when the daemon is already dead, which is safe.)
+
+⚠️ The watchdog uses `systemctl restart --no-block happy`. **`--no-block` is required, not cosmetic** — a blocking restart issued from inside a unit can deadlock, with the restart job ordered against the still-running `happy-health.service` and each waiting on the other. For the same reason the unit deliberately carries **no** `After=happy.service`.
+
+**Activation (run once; `daemon-reload` must come first or the restart won't see the drop-in):**
+
+```bash
+systemctl daemon-reload
+systemctl enable --now happy-health.timer happy-logprune.timer
+systemctl restart happy              # reparents the daemon into the unit + exercises the new ExecStartPre
+systemctl list-timers 'happy-*'      # confirm both timers are scheduled
+happy daemon status                  # the real liveness check
+journalctl -u happy-health           # see restarts the watchdog performed
+```
+
+#### Log growth: prune by age *and* size
+
+`/root/.happy/logs` was found at **1.3 GB across 221 files** on 2026-08-18. happy writes one log per process and never reopens them, so logrotate's rotate-in-place model does not fit — `happy-logprune.timer` (daily) prunes instead.
+
+**Age alone is not enough, and the reason is worth remembering:** the five largest logs (1.15 GB — 90% of the directory) all carried an mtime of `2026-08-02`, the *previous reboot*, because they were orphaned sessions (#4) writing continuously for weeks until the reboot killed them. A 30-day rule would have deleted 206 small files to reclaim just 124 MB and kept every giant one. So there are two rules: `-mtime +30`, and `-size +100M -mtime +3`. A log still being written always has a fresh mtime, so the size rule can never match a live daemon's log.
+
+⚠️ **These logs contain live `Authorization: Bearer` tokens** in dumped axios error objects — treat them as credentials, never paste them into issues or commits.
 
 #### Orphaned-session RAM leak + the `ExecStartPre` reaper (#4)
 
