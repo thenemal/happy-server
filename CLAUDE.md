@@ -207,16 +207,41 @@ The happy-server codebase can lag behind the CLI/app client versions. Symptoms: 
 | `POST /v3/sessions/:id/messages` | 2026-05-09 | CLI v1.1.8+ uses HTTP batch insert instead of WebSocket `message` event |
 | `DELETE /v1/machines/:id` | 2026-05-12 | App sends delete when user removes an old machine |
 
-#### ⚠️ The upstream relay is archived — these patches are permanent
+#### ⚠️ Upstream MOVED to a monorepo — our fork is ~6 months and 97 commits behind
 
-**`slopus/happy-server` was archived on 2026-02-14**, one day after its final commit (`922a62f`, 2026-02-13). It is read-only and will never receive another commit. Verified 2026-08-18: `git fetch upstream && git log HEAD..upstream/main` → **0 commits**.
+**`slopus/happy-server` was archived on 2026-02-14 because it was merged into [`slopus/happy`](https://github.com/slopus/happy), not because it was abandoned.** Its README says so plainly:
 
-So the older advice to "re-check after a `git pull`, they may have been added upstream" is **moot** — the endpoints above will never appear upstream, and no upstream fix for anything will ever arrive. They are ours to maintain permanently.
+> *"This repository has been merged to the main one. All issues and code is now living there."*
 
-The consequence worth internalizing: **the client keeps moving and the server is frozen, so drift is one-directional and structural.** `slopus/happy` (the CLI) is very much alive — pushed 2026-08-10, 23k stars. Every future CLI release is a chance for a new endpoint to 404 against this relay, and the only possible fix is a local patch. Check server logs for 404s after any client upgrade.
+`slopus/happy-cli` was archived the same day for the same reason. The live server source is now **`packages/happy-server/`** inside the monorepo, and it is very much maintained: **97 commits since our 2026-02-13 fork point**, most recent 2026-08-10.
+
+**Do not read `isArchived: true` on the old repo as "project dead."** Checking the archive flag without reading the README produces exactly the wrong conclusion — that mistake was made and committed on 2026-08-18 (see a96e6e0, corrected here). `git fetch upstream` returning 0 commits is *expected* and means nothing: the `upstream` remote points at the frozen standalone repo, not the monorepo.
+
+**Our local patches are no longer local.** The monorepo has a dedicated `sources/app/api/routes/v3SessionRoutes.ts` **plus `v3SessionRoutes.test.ts`** — the v3 message endpoints we hand-patched now exist upstream as a proper tested module. It also has `attachmentRoutes.ts`, `machinesRoutes.spec.ts` and `pushRoutes.spec.ts`, none of which we have. So the "re-check after a pull, they may have been added upstream (great, remove the patch)" advice is **live again** — that is precisely what happened.
+
+To diff against real upstream, add the monorepo as a remote and compare against `packages/happy-server/`:
+
+```bash
+gh api repos/slopus/happy/contents/packages/happy-server/sources/app/api/routes --jq '.[].name'
+gh api "repos/slopus/happy/commits?path=packages/happy-server&per_page=20" \
+  --jq '.[] | "\(.commit.author.date[:10])  \(.commit.message | split("\n")[0])"'
+```
+
+#### There is an official self-host path (simpler than this Compose stack)
+
+`packages/happy-server-self-host` is published to npm as **`happy-server-self-host`** (latest **1.1.11**, 2026-06-10):
+
+```bash
+npm install -g happy happy-server-self-host
+happy server
+```
+
+`happy server` discovers the package and runs the sync server **plus the bundled web app** on embedded **PGlite** storage with local-filesystem uploads — **no Postgres, no Redis, no S3** — and writes `settings.serverUrl` so the CLI and daemon target it. That replaces this repo's four-container stack (`happy-server` + `postgres` + `redis` + `minio`) and would also retire the separate self-hosted-web-app work in issue #3, since the web app ships with it.
+
+Caveat before switching: `happy-server-self-host` is at 1.1.11 while the CLI is at 1.2.0, so it *lags the client*. Migration also means moving existing Postgres/MinIO data into PGlite/local files — not a drop-in for a running instance with history. Relevant docs in the monorepo: `docs/deployment.md`, `docs/backend-architecture.md`, `docs/api.md`, `docs/protocol.md`, `docs/plans/happy-serve-self-host.md`.
 
 Two gotchas when checking upstream from this repo:
-- **`gh` targets the wrong repo by default here.** With both `origin` (`thenemal/happy-server`) and `upstream` (`slopus/happy-server`) remotes, `gh` prefers `upstream` — so a bare `gh issue create` silently tries the *archived* repo and fails with "Repository was archived so is read-only". Pinned via `git config remote.origin.gh-resolved base`; verify with `gh repo view --json nameWithOwner`.
+- **`gh` targets the wrong repo by default here, and the `upstream` remote is stale.** With both `origin` (`thenemal/happy-server`) and `upstream` (`slopus/happy-server`) remotes, `gh` prefers `upstream` — so a bare `gh issue create` silently tries the *archived* repo and fails with "Repository was archived so is read-only". Pinned via `git config remote.origin.gh-resolved base`; verify with `gh repo view --json nameWithOwner`. Note the `upstream` remote itself now points at a dead repo — real upstream is `slopus/happy` `packages/happy-server/`.
 - **`happy --version` is misleading** — it passes through to Claude Code and prints *that* version. For the real CLI version use `node -p "require('/usr/local/lib/node_modules/happy/package.json').version"`, or read `startedWithCliVersion` from `happy daemon status`.
 
 **Client compatibility:** verified 2026-08-18 against happy CLI **1.2.0** (upgraded from 1.1.10 that day). Before upgrading, the API surface of both tarballs was diffed rather than assumed: **9 base endpoints and 7 constructed sub-routes, identical in both** — including the patched `v3/sessions/:id/messages` — and the same `@anthropic-ai/claude-agent-sdk` constraint (`^0.3.179`). Post-upgrade the daemon registers, holds its WebSocket, and the relay answers 200. The v3 patch is still needed and still works.
