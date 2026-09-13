@@ -218,7 +218,7 @@ happy CLI 1.2.0 **and** 1.2.3 call session sub-routes this fork lacks; all exist
 | Route | 404s | Impact | Upstream |
 |---|---|---|---|
 | `POST /v1/sessions/:id/push-event` | 28 | **All CLI session push notifications (done / permission / question) silently dropped** — the CLI only falls back to direct Expo when `sessionId` is absent | `pushRoutes.ts` + `app/push/*` |
-| `POST /v1/sessions/:id/archive` | 4 | Ctrl-C/SIGTERM backup deactivation no-ops (socket `session-end` still works) | `sessionRoutes.ts` |
+| `POST /v1/sessions/:id/archive` | 4 | Ctrl-C/SIGTERM backup deactivation no-ops (socket `session-end` still works). ⚠️ Ported on branch `fix/9-session-archive`, unverified | `sessionRoutes.ts` |
 | `POST /v1/sessions/:id/attachments/request-upload` / `request-download` | 0 | Image attachments would fail | `attachmentRoutes.ts` |
 
 No DB migration needed for any of them. Attachments are deferred: presigned URLs would be signed for the internal `minio:9000` host. Port plan: #9.
@@ -347,6 +347,8 @@ sources/
 ### Key patterns
 
 **Transactions — `inTx` / `afterTx`**: All DB writes use `inTx`, which runs at `Serializable` isolation with automatic retry (up to 3×, backoff 100/200/300 ms) on Prisma P2034 conflicts. Use `afterTx(tx, callback)` to schedule side-effects (event emissions, notifications) that only fire after the transaction commits — never emit events directly inside a transaction.
+
+**Session deactivation — `activityCache.clearSessionUpdates` / `resumeSessionUpdates`**: `session-alive` heartbeats are batched in `presence/sessionCache.ts` and flushed every 5s as `active: true`. Any path that sets a session `active: false` or deletes it (socket `session-end`, `POST /v1/sessions/:id/archive`, `DELETE /v1/sessions/:id`) must call `clearSessionUpdates(id)` **before** its DB write, or an in-flight heartbeat re-activates the session. That suppresses heartbeats for 60s; `POST /v1/sessions` calls `resumeSessionUpdates(id)` so a session restarting with the same tag is not stuck inactive. A new start/reuse path needs the resume call too.
 
 **Encryption**: `encryptString` / `decryptString` / `encryptBytes` / `decryptBytes` from `@/modules/encrypt` — always use these, never roll your own crypto. Use `privacyKit.encodeBase64` / `decodeBase64` (from `privacy-kit`) instead of `Buffer`.
 
