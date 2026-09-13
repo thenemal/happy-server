@@ -182,6 +182,13 @@ export type EphemeralEvent = {
     machineId: string;
     online: boolean;
     timestamp: number;
+} | {
+    type: 'session-event';
+    sessionId: string;
+    kind: 'done' | 'permission' | 'question';
+    title: string;
+    body: string;
+    timestamp: number;
 };
 
 // === EVENT PAYLOAD TYPES ===
@@ -227,6 +234,26 @@ class EventRouter {
 
     getConnections(userId: string): Set<ClientConnection> | undefined {
         return this.userConnections.get(userId);
+    }
+
+    /**
+     * True only when the user has a UI client (mobile/web) in the foreground:
+     * a `user-scoped` connection whose socket reported `app-state: active`.
+     * Session-scoped (the coding agent) and machine-scoped (the daemon)
+     * sockets never count — counting them would let a live session's own
+     * socket suppress the push it is asking for. Used for push suppression.
+     */
+    hasActiveUiClient(userId: string): boolean {
+        const connections = this.userConnections.get(userId);
+        if (!connections) {
+            return false;
+        }
+        for (const connection of connections) {
+            if (connection.connectionType === 'user-scoped' && connection.socket.data.appState === 'active') {
+                return true;
+            }
+        }
+        return false;
     }
 
     // === EVENT EMISSION METHODS ===
@@ -531,6 +558,22 @@ export function buildMachineStatusEphemeral(machineId: string, online: boolean):
         type: 'machine-status',
         machineId,
         online,
+        timestamp: Date.now()
+    };
+}
+
+/**
+ * Session-level lifecycle event (Claude finished, needs permission, asks question).
+ * Emitted alongside the mobile push so other clients (e.g. web) can surface an
+ * indicator without parsing every encrypted message.
+ */
+export function buildSessionEventEphemeral(sessionId: string, kind: 'done' | 'permission' | 'question', title: string, body: string): EphemeralPayload {
+    return {
+        type: 'session-event',
+        sessionId,
+        kind,
+        title,
+        body,
         timestamp: Date.now()
     };
 }

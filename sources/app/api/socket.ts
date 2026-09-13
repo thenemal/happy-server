@@ -111,6 +111,18 @@ export function startSocket(app: Fastify) {
             });
         }
 
+        // Track app focus state for push notification suppression (#9).
+        // State lives on socket.data and disappears with the socket. The
+        // handshake value closes the race between connect and the first
+        // async app-state event.
+        const initialAppState = socket.handshake.auth.appState as string | undefined;
+        if (initialAppState) {
+            socket.data.appState = initialAppState === 'active' ? 'active' : 'background';
+        }
+        socket.on('app-state', (data: { state: string }) => {
+            socket.data.appState = data?.state === 'active' ? 'active' : 'background';
+        });
+
         socket.on('disconnect', () => {
             websocketEventsCounter.inc({ event_type: 'disconnect' });
 
