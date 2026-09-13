@@ -210,20 +210,14 @@ The happy-server codebase can lag behind the CLI/app client versions. Symptoms: 
 | `GET /v3/sessions/:id/messages?after_seq&limit` | 2026-05-09 | CLI v1.1.8+ uses HTTP polling instead of WebSocket for message fetch |
 | `POST /v3/sessions/:id/messages` | 2026-05-09 | CLI v1.1.8+ uses HTTP batch insert instead of WebSocket `message` event |
 | `DELETE /v1/machines/:id` | 2026-05-12 | App sends delete when user removes an old machine |
+| `POST /v1/sessions/:id/push-event` | 2026-09-13 (#9, PR #10) | CLI 1.2.0+ sends session pushes (done/permission/question) through the server. Missing, it 404'd 28× and **no session push ever reached the phone** — the CLI only logs the failure at debug level |
+| `POST /v1/sessions/:id/archive` | 2026-09-13 (#9, PR #11) | CLI calls it when the session process gets **SIGTERM** (app/daemon stop). An interactive double Ctrl-C does *not* call it — that path uses the socket `session-end` event |
 
-#### Missing server routes (#9 — found 2026-09-13)
+All ported from upstream `slopus/happy` `packages/happy-server`; no DB migration. Verified 2026-09-13: backgrounded app → push sent; foregrounded → suppressed; Ctrl-C and SIGTERM sessions both go `active=false` and stay there past the 60s suppression window.
 
-happy CLI 1.2.0 **and** 1.2.3 call session sub-routes this fork lacked; all exist upstream in `slopus/happy` `packages/happy-server`. Relay-log 404 counts over the container's lifetime before the port:
+**Still missing — attachments** (`POST /v1/sessions/:id/attachments/request-upload` / `request-download`, upstream `attachmentRoutes.ts`): image attachments would fail. Deferred, not trivial: presigned URLs would be signed for the internal `minio:9000` host, unreachable from the CLI, so it needs a second public-endpoint S3 client plus a Caddy host-header check.
 
-| Route | 404s | Impact while missing | Status |
-|---|---|---|---|
-| `POST /v1/sessions/:id/push-event` | 28 | **All CLI session push notifications (done / permission / question) silently dropped** — the CLI only falls back to direct Expo when `sessionId` is absent | ⚠️ ported (PR #10: `pushRoutes.ts` + `app/push/*`), deployed 2026-09-13, awaiting device test |
-| `POST /v1/sessions/:id/archive` | 4 | Ctrl-C/SIGTERM backup deactivation no-ops (socket `session-end` still works) | ⚠️ ported (PR #11: `sessionRoutes.ts` + `presence/sessionCache.ts` heartbeat suppression), deployed 2026-09-13, awaiting device test |
-| `POST /v1/sessions/:id/attachments/request-upload` / `request-download` | 0 | Image attachments would fail | deferred — upstream `attachmentRoutes.ts` |
-
-No DB migration needed for any of them. Attachments are deferred: presigned URLs would be signed for the internal `minio:9000` host.
-
-**Push suppression (PR #10):** a push is suppressed only when a `user-scoped` socket has reported `app-state: active` (`eventRouter.hasActiveUiClient`, fed by `socket.data.appState` in `socket.ts`). Session- and machine-scoped sockets never count, a client that never reported state counts as absent, and a throwing presence check sends anyway — a missed push costs more than a redundant one. Upstream checks presence with socket.io `fetchSockets()` across replicas; this fork reads its single-process in-memory connection map instead, so porting upstream's `eventRouter` refactor later means revisiting that method.
+**Push suppression:** a push is suppressed only when a `user-scoped` socket has reported `app-state: active` (`eventRouter.hasActiveUiClient`, fed by `socket.data.appState` in `socket.ts`). Session- and machine-scoped sockets never count, a client that never reported state counts as absent, and a throwing presence check sends anyway — a missed push costs more than a redundant one. Upstream checks presence with socket.io `fetchSockets()` across replicas; this fork reads its single-process in-memory connection map instead, so porting upstream's `eventRouter` refactor later means revisiting that method.
 
 #### ⚠️ Upstream MOVED to a monorepo — our fork is ~6 months and 97 commits behind
 
@@ -274,7 +268,7 @@ Two gotchas when checking upstream from this repo:
 
 **Upgraded to 1.2.3 on 2026-09-13 (#8)** ✅ verified by user 2026-09-13 (remote session from mobile works). Tarball API diff vs 1.2.0: identical. Only change of note: agent-sdk constraint `^0.3.179` → `^0.3.259` (installs 0.3.270). Post-upgrade: daemon `startedWithCliVersion 1.2.3`, cgroup `/system.slice/happy.service`, machine registered + WebSocket connected, relay 200. Sequence used (least risky): stop long-lived sessions → `systemctl stop happy-health.timer` (so the watchdog can't race the swap) → `npm i -g --prefix /usr/local happy@1.2.3` → `systemctl restart happy` → verify → re-enable timer. **Rollback:** `npm i -g --prefix /usr/local /root/.happy/rollback/happy-1.2.0.tgz && systemctl restart happy`. (A `pgrep` right after the restart may briefly show a second PID in a `user.slice` session scope — that is the transient `daemon start` launcher, gone within seconds; confirm with `ps -eo pid,cgroup,args | grep happy/dist`.)
 
-⚠️ **The CLI-vs-CLI diff never checks the CLI against *our server*.** It proved 1.2.0 → 1.2.3 changed nothing, but both versions call session sub-routes this fork has never had — see *Missing server routes* below. When diffing, also compare the constructed routes against `grep -rhoE "app\.(get|post|put|patch|delete)\('[^']+'" sources/app/api/routes`. The simple `/v[0-9]+/...` grep only shows the literal prefix of template-built routes; find them with `grep -rhoaE "/v1/sessions/\\$\{[^}]+\}/[a-z/-]+" dist`.
+⚠️ **The CLI-vs-CLI diff never checks the CLI against *our server*.** It proved 1.2.0 → 1.2.3 changed nothing, but both versions call session sub-routes this fork has never had — see *Known API version gaps* above (push-event, archive, attachments). When diffing, also compare the constructed routes against `grep -rhoE "app\.(get|post|put|patch|delete)\('[^']+'" sources/app/api/routes`. The simple `/v[0-9]+/...` grep only shows the literal prefix of template-built routes; find them with `grep -rhoaE "/v1/sessions/\\$\{[^}]+\}/[a-z/-]+" dist`.
 
 Note 1.2.0 was published to **npm only** — GitHub releases stop at `cli-1.1.10`, so there are no changelog notes for it. Diffing the tarball is the only reliable pre-upgrade check. To repeat it: `npm pack happy@<ver>`, unpack, then `grep -rhoE "/v[0-9]+/[a-zA-Z0-9/_.:-]+" dist | sort -u` against the installed copy's `dist`.
 
