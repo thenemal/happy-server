@@ -217,7 +217,7 @@ The happy-server codebase can lag behind the CLI/app client versions. Symptoms: 
 
 **Do not read `isArchived: true` on the old repo as "project dead."** Checking the archive flag without reading the README produces exactly the wrong conclusion — that mistake was made and committed on 2026-08-18 (see a96e6e0, corrected here). `git fetch upstream` returning 0 commits is *expected* and means nothing: the `upstream` remote points at the frozen standalone repo, not the monorepo.
 
-**Our local patches are no longer local.** The monorepo has a dedicated `sources/app/api/routes/v3SessionRoutes.ts` **plus `v3SessionRoutes.test.ts`** — the v3 message endpoints we hand-patched now exist upstream as a proper tested module. It also has `attachmentRoutes.ts`, `machinesRoutes.spec.ts` and `pushRoutes.spec.ts`, none of which we have. So the "re-check after a pull, they may have been added upstream (great, remove the patch)" advice is **live again** — that is precisely what happened.
+**Our local patches are no longer local.** The monorepo has a dedicated `sources/app/api/routes/v3SessionRoutes.ts` **plus `v3SessionRoutes.test.ts`** — the v3 message endpoints we hand-patched now exist upstream as a proper tested module. **`DELETE /v1/machines/:id` is upstream too** (`machinesRoutes.ts`, confirmed 2026-09-13), so **both** entries in the table above are superseded — the fork carries nothing upstream lacks. It also has `attachmentRoutes.ts`, `machinesRoutes.spec.ts` and `pushRoutes.spec.ts`, none of which we have. So the "re-check after a pull, they may have been added upstream (great, remove the patch)" advice is **live again** — that is precisely what happened.
 
 To diff against real upstream, add the monorepo as a remote and compare against `packages/happy-server/`:
 
@@ -226,6 +226,14 @@ gh api repos/slopus/happy/contents/packages/happy-server/sources/app/api/routes 
 gh api "repos/slopus/happy/commits?path=packages/happy-server&per_page=20" \
   --jq '.[] | "\(.commit.author.date[:10])  \(.commit.message | split("\n")[0])"'
 ```
+
+#### Scheduled upstream watch (cloud routine)
+
+A claude.ai cloud routine, **`happy-server upstream watch`** (`trig_017YePh7geaUJiqC8jQVPYpS`), runs on the 1st of each month at 08:00 UTC (`0 8 1 * *`) — it is **not** a local cron or systemd timer, so `crontab -l` / `systemctl list-timers` won't show it. List/inspect it via the `RemoteTrigger` tool (or claude.ai/code/routines). It checks out this fork read-only and emails Seb **only** when something is new: `packages/happy-server` commits in `slopus/happy` over the last 35 days, relevant PRs, new `happy` / `happy-server-self-host` npm versions, or API/protocol/migration changes. Quiet months send nothing.
+
+⚠️ **Until 2026-09-13 it watched the archived `slopus/happy-server`**, so it was structurally incapable of alerting — every "silent" month before that date means nothing. Rewritten that day to target the monorepo, with a baseline embedded in the prompt (upstream server commit `de4f215cf` of 2026-08-25; npm `happy` 1.2.3, `happy-server-self-host` 1.1.11; both local patches superseded). **When the baseline moves** (CLI upgrade, migration off this fork), update the prompt's baseline section too, or it will keep reporting already-known items.
+
+⚠️ **The cloud sandbox cannot use the GitHub API for repos not attached to the routine.** Only `thenemal/happy-server` is attached, so `api.github.com/repos/slopus/happy/...` returns 403 from both `curl` and WebFetch, and the GitHub MCP tools refuse it ("not configured for this session"). What *does* work (verified in the 2026-09-13 test run): **WebFetch on plain `github.com` HTML pages** (`/slopus/happy/commits/main/packages/happy-server`, `/tree/...`, `/pulls?q=...`) and on **`registry.npmjs.org/<pkg>/latest`** (the full package document gets truncated — use `/latest`). The prompt spells these URLs out; don't "simplify" it back to `curl api.github.com`, or the routine will fail and — worse — may read the failure as "nothing new". The prompt also makes a failed fetch an email-worthy event for that reason.
 
 #### There is an official self-host path (simpler than this Compose stack)
 
@@ -244,7 +252,7 @@ Two gotchas when checking upstream from this repo:
 - **`gh` targets the wrong repo by default here, and the `upstream` remote is stale.** With both `origin` (`thenemal/happy-server`) and `upstream` (`slopus/happy-server`) remotes, `gh` prefers `upstream` — so a bare `gh issue create` silently tries the *archived* repo and fails with "Repository was archived so is read-only". Pinned via `git config remote.origin.gh-resolved base`; verify with `gh repo view --json nameWithOwner`. Note the `upstream` remote itself now points at a dead repo — real upstream is `slopus/happy` `packages/happy-server/`.
 - **`happy --version` is misleading** — it passes through to Claude Code and prints *that* version. For the real CLI version use `node -p "require('/usr/local/lib/node_modules/happy/package.json').version"`, or read `startedWithCliVersion` from `happy daemon status`.
 
-**Client compatibility:** verified 2026-08-18 against happy CLI **1.2.0** (upgraded from 1.1.10 that day). Before upgrading, the API surface of both tarballs was diffed rather than assumed: **9 base endpoints and 7 constructed sub-routes, identical in both** — including the patched `v3/sessions/:id/messages` — and the same `@anthropic-ai/claude-agent-sdk` constraint (`^0.3.179`). Post-upgrade the daemon registers, holds its WebSocket, and the relay answers 200. The v3 patch is still needed and still works.
+**Client compatibility:** verified 2026-08-18 against happy CLI **1.2.0** (upgraded from 1.1.10 that day). Before upgrading, the API surface of both tarballs was diffed rather than assumed: **9 base endpoints and 7 constructed sub-routes, identical in both** — including the patched `v3/sessions/:id/messages` — and the same `@anthropic-ai/claude-agent-sdk` constraint (`^0.3.179`). Post-upgrade the daemon registers, holds its WebSocket, and the relay answers 200. The v3 patch is still needed and still works. (As of 2026-09-13 npm `happy` is at **1.2.3** — not yet diffed or installed here.)
 
 Note 1.2.0 was published to **npm only** — GitHub releases stop at `cli-1.1.10`, so there are no changelog notes for it. Diffing the tarball is the only reliable pre-upgrade check. To repeat it: `npm pack happy@<ver>`, unpack, then `grep -rhoE "/v[0-9]+/[a-zA-Z0-9/_.:-]+" dist | sort -u` against the installed copy's `dist`.
 
