@@ -211,17 +211,19 @@ The happy-server codebase can lag behind the CLI/app client versions. Symptoms: 
 | `POST /v3/sessions/:id/messages` | 2026-05-09 | CLI v1.1.8+ uses HTTP batch insert instead of WebSocket `message` event |
 | `DELETE /v1/machines/:id` | 2026-05-12 | App sends delete when user removes an old machine |
 
-#### Missing server routes (open — found 2026-09-13)
+#### Missing server routes (#9 — found 2026-09-13)
 
-happy CLI 1.2.0 **and** 1.2.3 call session sub-routes this fork lacks; all exist upstream in `slopus/happy` `packages/happy-server`. Relay-log 404 counts over the container's lifetime:
+happy CLI 1.2.0 **and** 1.2.3 call session sub-routes this fork lacked; all exist upstream in `slopus/happy` `packages/happy-server`. Relay-log 404 counts over the container's lifetime before the port:
 
-| Route | 404s | Impact | Upstream |
+| Route | 404s | Impact while missing | Status |
 |---|---|---|---|
-| `POST /v1/sessions/:id/push-event` | 28 | **All CLI session push notifications (done / permission / question) silently dropped** — the CLI only falls back to direct Expo when `sessionId` is absent | `pushRoutes.ts` + `app/push/*` |
-| `POST /v1/sessions/:id/archive` | 4 | Ctrl-C/SIGTERM backup deactivation no-ops (socket `session-end` still works). ⚠️ Ported on branch `fix/9-session-archive`, unverified | `sessionRoutes.ts` |
-| `POST /v1/sessions/:id/attachments/request-upload` / `request-download` | 0 | Image attachments would fail | `attachmentRoutes.ts` |
+| `POST /v1/sessions/:id/push-event` | 28 | **All CLI session push notifications (done / permission / question) silently dropped** — the CLI only falls back to direct Expo when `sessionId` is absent | ⚠️ ported (PR #10: `pushRoutes.ts` + `app/push/*`), deployed 2026-09-13, awaiting device test |
+| `POST /v1/sessions/:id/archive` | 4 | Ctrl-C/SIGTERM backup deactivation no-ops (socket `session-end` still works) | ⚠️ ported (PR #11: `sessionRoutes.ts` + `presence/sessionCache.ts` heartbeat suppression), deployed 2026-09-13, awaiting device test |
+| `POST /v1/sessions/:id/attachments/request-upload` / `request-download` | 0 | Image attachments would fail | deferred — upstream `attachmentRoutes.ts` |
 
-No DB migration needed for any of them. Attachments are deferred: presigned URLs would be signed for the internal `minio:9000` host. Port plan: #9.
+No DB migration needed for any of them. Attachments are deferred: presigned URLs would be signed for the internal `minio:9000` host.
+
+**Push suppression (PR #10):** a push is suppressed only when a `user-scoped` socket has reported `app-state: active` (`eventRouter.hasActiveUiClient`, fed by `socket.data.appState` in `socket.ts`). Session- and machine-scoped sockets never count, a client that never reported state counts as absent, and a throwing presence check sends anyway — a missed push costs more than a redundant one. Upstream checks presence with socket.io `fetchSockets()` across replicas; this fork reads its single-process in-memory connection map instead, so porting upstream's `eventRouter` refactor later means revisiting that method.
 
 #### ⚠️ Upstream MOVED to a monorepo — our fork is ~6 months and 97 commits behind
 
