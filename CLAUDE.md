@@ -154,6 +154,10 @@ journalctl -u happy-health           # see restarts the watchdog performed
 
 **Age alone is not enough, and the reason is worth remembering:** the five largest logs (1.15 GB — 90% of the directory) all carried an mtime of `2026-08-02`, the *previous reboot*, because they were orphaned sessions (#4) writing continuously for weeks until the reboot killed them. A 30-day rule would have deleted 206 small files to reclaim just 124 MB and kept every giant one. So there are two rules: `-mtime +30`, and `-size +100M -mtime +3`. A log still being written always has a fresh mtime, so the size rule can never match a live daemon's log.
 
+**Rule 3 — file count (added 2026-09-13):** every CLI invocation writes its own log, *including* the `happy daemon status` that `happy-health.timer` runs every 5 minutes — ~270 files/day of ~300 bytes, which had reached **7,047 files** by 2026-09-13 (the 30-day rule would have let it plateau near 8,000). Rule: `! -name '*-daemon.log' -size -2k -mtime +7` — tiny one-shot command logs only (status/list/doctor/`resume --help`), never a session or daemon log. First run took the directory from 7,051 → 2,168 files; steady state ≈ 1,900.
+
+⚠️ **The size rule cannot touch a long-lived *tracked* session.** On 2026-09-13 four daemon sessions aged 13–26 days held ~1.5 GB RSS and 105–213 MB logs each, growing ~8 MB/day apiece (a `SESSION_SCANNER` line every 3 s). Their mtime is always fresh and the daemon still lists them, so neither the pruner nor the `ExecStartPre` reaper sees them. Only stopping the session reclaims them — see #4.
+
 ⚠️ **These logs contain live `Authorization: Bearer` tokens** in dumped axios error objects — treat them as credentials, never paste them into issues or commits.
 
 #### Orphaned-session RAM leak + the `ExecStartPre` reaper (#4)
@@ -207,6 +211,18 @@ The happy-server codebase can lag behind the CLI/app client versions. Symptoms: 
 | `POST /v3/sessions/:id/messages` | 2026-05-09 | CLI v1.1.8+ uses HTTP batch insert instead of WebSocket `message` event |
 | `DELETE /v1/machines/:id` | 2026-05-12 | App sends delete when user removes an old machine |
 
+#### Missing server routes (open — found 2026-09-13)
+
+happy CLI 1.2.0 **and** 1.2.3 call session sub-routes this fork lacks; all exist upstream in `slopus/happy` `packages/happy-server`. Relay-log 404 counts over the container's lifetime:
+
+| Route | 404s | Impact | Upstream |
+|---|---|---|---|
+| `POST /v1/sessions/:id/push-event` | 28 | **All CLI session push notifications (done / permission / question) silently dropped** — the CLI only falls back to direct Expo when `sessionId` is absent | `pushRoutes.ts` + `app/push/*` |
+| `POST /v1/sessions/:id/archive` | 4 | Ctrl-C/SIGTERM backup deactivation no-ops (socket `session-end` still works) | `sessionRoutes.ts` |
+| `POST /v1/sessions/:id/attachments/request-upload` / `request-download` | 0 | Image attachments would fail | `attachmentRoutes.ts` |
+
+No DB migration needed for any of them. Attachments are deferred: presigned URLs would be signed for the internal `minio:9000` host. Port plan: #9.
+
 #### ⚠️ Upstream MOVED to a monorepo — our fork is ~6 months and 97 commits behind
 
 **`slopus/happy-server` was archived on 2026-02-14 because it was merged into [`slopus/happy`](https://github.com/slopus/happy), not because it was abandoned.** Its README says so plainly:
@@ -252,7 +268,11 @@ Two gotchas when checking upstream from this repo:
 - **`gh` targets the wrong repo by default here, and the `upstream` remote is stale.** With both `origin` (`thenemal/happy-server`) and `upstream` (`slopus/happy-server`) remotes, `gh` prefers `upstream` — so a bare `gh issue create` silently tries the *archived* repo and fails with "Repository was archived so is read-only". Pinned via `git config remote.origin.gh-resolved base`; verify with `gh repo view --json nameWithOwner`. Note the `upstream` remote itself now points at a dead repo — real upstream is `slopus/happy` `packages/happy-server/`.
 - **`happy --version` is misleading** — it passes through to Claude Code and prints *that* version. For the real CLI version use `node -p "require('/usr/local/lib/node_modules/happy/package.json').version"`, or read `startedWithCliVersion` from `happy daemon status`.
 
-**Client compatibility:** verified 2026-08-18 against happy CLI **1.2.0** (upgraded from 1.1.10 that day). Before upgrading, the API surface of both tarballs was diffed rather than assumed: **9 base endpoints and 7 constructed sub-routes, identical in both** — including the patched `v3/sessions/:id/messages` — and the same `@anthropic-ai/claude-agent-sdk` constraint (`^0.3.179`). Post-upgrade the daemon registers, holds its WebSocket, and the relay answers 200. The v3 patch is still needed and still works. (As of 2026-09-13 npm `happy` is at **1.2.3** — not yet diffed or installed here.)
+**Client compatibility:** verified 2026-08-18 against happy CLI **1.2.0** (upgraded from 1.1.10 that day). Before upgrading, the API surface of both tarballs was diffed rather than assumed: **9 base endpoints and 7 constructed sub-routes, identical in both** — including the patched `v3/sessions/:id/messages` — and the same `@anthropic-ai/claude-agent-sdk` constraint (`^0.3.179`). Post-upgrade the daemon registers, holds its WebSocket, and the relay answers 200. The v3 patch is still needed and still works.
+
+**Upgraded to 1.2.3 on 2026-09-13 (#8)** ⚠️ deployed, awaiting user test. Tarball API diff vs 1.2.0: identical. Only change of note: agent-sdk constraint `^0.3.179` → `^0.3.259` (installs 0.3.270). Post-upgrade: daemon `startedWithCliVersion 1.2.3`, cgroup `/system.slice/happy.service`, machine registered + WebSocket connected, relay 200. Sequence used (least risky): stop long-lived sessions → `systemctl stop happy-health.timer` (so the watchdog can't race the swap) → `npm i -g --prefix /usr/local happy@1.2.3` → `systemctl restart happy` → verify → re-enable timer. **Rollback:** `npm i -g --prefix /usr/local /root/.happy/rollback/happy-1.2.0.tgz && systemctl restart happy`. (A `pgrep` right after the restart may briefly show a second PID in a `user.slice` session scope — that is the transient `daemon start` launcher, gone within seconds; confirm with `ps -eo pid,cgroup,args | grep happy/dist`.)
+
+⚠️ **The CLI-vs-CLI diff never checks the CLI against *our server*.** It proved 1.2.0 → 1.2.3 changed nothing, but both versions call session sub-routes this fork has never had — see *Missing server routes* below. When diffing, also compare the constructed routes against `grep -rhoE "app\.(get|post|put|patch|delete)\('[^']+'" sources/app/api/routes`. The simple `/v[0-9]+/...` grep only shows the literal prefix of template-built routes; find them with `grep -rhoaE "/v1/sessions/\\$\{[^}]+\}/[a-z/-]+" dist`.
 
 Note 1.2.0 was published to **npm only** — GitHub releases stop at `cli-1.1.10`, so there are no changelog notes for it. Diffing the tarball is the only reliable pre-upgrade check. To repeat it: `npm pack happy@<ver>`, unpack, then `grep -rhoE "/v[0-9]+/[a-zA-Z0-9/_.:-]+" dist | sort -u` against the installed copy's `dist`.
 
