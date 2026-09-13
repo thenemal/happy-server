@@ -1,4 +1,5 @@
-import { eventRouter, buildNewSessionUpdate, buildNewMessageUpdate } from "@/app/events/eventRouter";
+import { eventRouter, buildNewSessionUpdate, buildNewMessageUpdate, buildSessionActivityEphemeral } from "@/app/events/eventRouter";
+import { activityCache } from "@/app/presence/sessionCache";
 import { type Fastify } from "../types";
 import { db } from "@/storage/db";
 import { z } from "zod";
@@ -238,6 +239,10 @@ export function sessionRoutes(app: Fastify) {
         });
         if (session) {
             log({ module: 'session-create', sessionId: session.id, userId, tag }, `Found existing session: ${session.id} for tag ${tag}`);
+
+            // Session is starting back up - stop ignoring its heartbeats if it was stopped
+            activityCache.resumeSessionUpdates(session.id);
+
             return reply.send({
                 session: {
                     id: session.id,
@@ -285,6 +290,9 @@ export function sessionRoutes(app: Fastify) {
                 payload: updatePayload,
                 recipientFilter: { type: 'user-scoped-only' }
             });
+
+            // No-op for a freshly created id; kept so both return paths behave the same
+            activityCache.resumeSessionUpdates(session.id);
 
             return reply.send({
                 session: {
@@ -463,6 +471,50 @@ export function sessionRoutes(app: Fastify) {
         return reply.send({ messages: created });
     });
 
+    // Archive session (force deactivate). The CLI calls this on Ctrl-C/SIGTERM as a
+    // backup to the socket session-end event, so it must be idempotent.
+    app.post('/v1/sessions/:sessionId/archive', {
+        schema: {
+            params: z.object({
+                sessionId: z.string()
+            })
+        },
+        preHandler: app.authenticate
+    }, async (request, reply) => {
+        const userId = request.userId;
+        const { sessionId } = request.params;
+
+        // Check ownership first so a foreign session id cannot suppress its owner's heartbeats
+        const session = await db.session.findFirst({
+            where: { id: sessionId, accountId: userId },
+            select: { id: true }
+        });
+        if (!session) {
+            return reply.code(404).send({ error: 'Session not found' });
+        }
+
+        // Drop queued heartbeats before deactivating, or the next batch flush writes active=true back
+        activityCache.clearSessionUpdates(sessionId);
+
+        const now = Date.now();
+        const result = await db.session.updateMany({
+            where: { id: sessionId, accountId: userId },
+            data: { active: false, lastActiveAt: new Date(now) }
+        });
+        if (result.count === 0) {
+            // Deleted between the ownership check and the update
+            return reply.code(404).send({ error: 'Session not found' });
+        }
+
+        eventRouter.emitEphemeral({
+            userId,
+            payload: buildSessionActivityEphemeral(sessionId, false, now, false),
+            recipientFilter: { type: 'user-scoped-only' }
+        });
+
+        return reply.send({ success: true });
+    });
+
     // Delete session
     app.delete('/v1/sessions/:sessionId', {
         schema: {
@@ -474,6 +526,9 @@ export function sessionRoutes(app: Fastify) {
     }, async (request, reply) => {
         const userId = request.userId;
         const { sessionId } = request.params;
+
+        // Drop queued heartbeats first, or the next batch flush tries to update the deleted row
+        activityCache.clearSessionUpdates(sessionId);
 
         const deleted = await sessionDelete({ uid: userId }, sessionId);
 
