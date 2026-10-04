@@ -51,16 +51,30 @@ echo 'export HAPPY_SERVER_URL=https://home8.compagnie-lily.org' >> ~/.bashrc
 
 > **Always set `HAPPY_SERVER_URL` before `happy auth login`** — if it's not set, auth registers against the default upstream server and the web/mobile pairing won't find the request on your server.
 
-### Linux: fix for "Process exited unexpectedly" (glibc systems)
+### Linux: fix for "Process exited unexpectedly" (running as root)
 
-The happy npm package bundles a musl Claude Code binary for Linux. On glibc systems (Debian, Ubuntu, most LXC containers), the bundled binary is missing and remote sessions crash. Fix by symlinking your system `claude` to the expected path:
+Remote sessions that die the instant they start are almost always the **root guard**, not a missing binary. The happy SDK launches Claude Code with `--permission-mode bypassPermissions`, and Claude Code refuses that as root:
 
-```bash
-sudo ln -sf ~/.local/bin/claude \
-  /usr/local/lib/node_modules/happy/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64-musl/claude
+```
+--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons
 ```
 
-Run once after `npm install -g happy` or after any happy upgrade.
+The SDK swallows that stderr, so the session just reports "Process exited unexpectedly". If the daemon legitimately runs as root inside a container, tell Claude Code so:
+
+```ini
+# /etc/systemd/system/happy.service.d/env-sandbox.conf
+[Service]
+Environment=IS_SANDBOX=1
+```
+
+```bash
+systemctl daemon-reload && systemctl restart happy
+systemctl show happy -p Environment   # expect IS_SANDBOX=1
+```
+
+Only do this where bypassing interactive permission prompts is actually appropriate — a container, with approvals handled elsewhere.
+
+> **The old musl-symlink workaround is obsolete — do not re-create it.** As of CLI 1.1.10 / agent-sdk 0.3.193 there is no `claude-agent-sdk-linux-x64-musl` package at all; the SDK ships a working glibc binary at `…/claude-agent-sdk-linux-x64/claude`. A symlink into the musl path fixes nothing and hides the real cause.
 
 ---
 
@@ -148,7 +162,16 @@ systemctl status happy          # shows "active (exited)" — normal for Type=on
 happy daemon status             # confirm the daemon is actually running with PID/port
 ```
 
-Auth credentials are saved to `~/.config/happy/` on first login and reused on subsequent starts — no interactive login needed at boot.
+Auth credentials are saved to **`~/.happy/`** (`access.key` plus `settings.json`) on first login and reused on subsequent starts — no interactive login needed at boot. There is no `~/.config/happy/`.
+
+> ⚠️ **That unit alone is not enough in production.** `happy daemon start` forks and returns 0, so systemd reports `active (exited)` even when the daemon died seconds later — one such silent death went unnoticed for 13 days. Before relying on it, add:
+>
+> - **ordering + readiness** — `After=docker.service` plus an `ExecStartPre` that polls your relay URL, so the daemon doesn't start before the relay answers (its machine registration otherwise times out and the process exits);
+> - **a liveness timer** — a 5-minute timer that matches on `happy daemon status` output and restarts the unit when the daemon is gone (use `systemctl restart --no-block`, or the restart can deadlock against the timer's own unit);
+> - **log pruning** — happy writes one log per process and never reopens them, so prune by age *and* size *and* count; a long-lived session log can reach hundreds of MB;
+> - **a session reaper** — daemon-spawned sessions never exit on their own and are not adopted across a daemon restart, so they leak 150–250 MB each until killed.
+>
+> Each of these is implemented and explained in `CLAUDE.md` for the `home8` instance, including the traps (systemd eats `${VAR:-default}`; `$$(seq …)` for a literal `$`).
 
 ### 6 — Adding the web app to the same account
 
@@ -232,6 +255,30 @@ Work through this order before touching Caddy or the proxy:
 git pull
 docker compose up -d --build
 ```
+
+Only the server rebuilds; Postgres, Redis and MinIO keep running. `prisma migrate deploy` runs on container start.
+
+### Keeping up with the clients
+
+The happy CLI and apps ship faster than this fork, and a client calling an endpoint the server lacks just gets a 404 — which the CLI often logs at debug level only, so a feature can be silently dead (session push notifications were, for months). Before upgrading the CLI, diff the client's API surface against the routes this server actually registers:
+
+```bash
+npm pack happy@<version> && tar xzf happy-<version>.tgz
+# literal routes
+grep -rhoE "/v[0-9]+/[a-zA-Z0-9/_.:-]+" package/dist | sort -u
+# routes built from template strings — easy to miss
+grep -rhoaE "/v1/sessions/\$\{[^}]+\}/[a-z/-]+" package/dist | sort -u
+# what this server answers
+grep -rhoE "app\.(get|post|put|patch|delete)\('[^']+'" sources/app/api/routes | sort -u
+```
+
+Also watch the relay's own 404 log for paths that look like real client calls rather than internet scanners:
+
+```bash
+docker compose logs happy-server | grep "404 - Method" | grep "/v[0-9]"
+```
+
+Upstream now lives in the [`slopus/happy`](https://github.com/slopus/happy) monorepo under `packages/happy-server/` — the standalone `slopus/happy-server` repo was archived when it was merged there, so a `git fetch` against it returning nothing means nothing.
 
 ## License
 
