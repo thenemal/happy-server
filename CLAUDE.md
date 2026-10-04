@@ -189,7 +189,38 @@ At `ExecStartPre` time the new daemon isn't running yet, so every `--started-by 
 
 ⚠️ **An `npm i -g` upgrade leaves the daemon outside systemd.** The version-mismatch self-restart spawns it from *your shell's* session scope, so it ends up in `/user.slice/…/session-N.scope` rather than the unit. Always follow an upgrade with `systemctl restart happy` — which conveniently reaps the orphans the upgrade just created. Confirm with `ps -o cgroup= -p <pid>` (want `/system.slice/happy.service`).
 
-This only fires **at restart** — it does not reap orphans that pile up *between* restarts. The liveness watchdog does **not** cover this: during the 1.2.0 upgrade the daemon was alive and healthy the whole time; it was the *sessions* that leaked. A periodic reaper (systemd timer / cron) is the planned follow-up; until then, `happy doctor clean` is the manual command (kills **all** happy processes — run when nothing is mid-flight). After editing the drop-in: `systemctl daemon-reload`.
+This only fires **at restart** — it does not reap orphans that pile up *between* restarts. The liveness watchdog does **not** cover this: during the 1.2.0 upgrade the daemon was alive and healthy the whole time; it was the *sessions* that leaked. `happy doctor clean` remains the manual sledgehammer (kills **all** happy processes — run when nothing is mid-flight). After editing the drop-in: `systemctl daemon-reload`.
+
+#### Periodic reaper: `happy-reap.timer` (#12, added 2026-10-04)
+
+`/usr/local/bin/happy-reap-sessions.sh`, every 30 min (`OnBootSec=5min`), covers what the restart-time reaper cannot — sessions that accumulate *between* restarts. Measured trigger: on 2026-10-04 one tracked session had been alive **5d 20h** holding ~440 MB across its `happy` + child `claude`, and `/root/.happy/logs` was back to **1.0 GB / 2,382 files** (one log alone 582 MB).
+
+Two cases, both only for `--started-by daemon` processes:
+
+| Case | Test | Action |
+|---|---|---|
+| orphan | pid absent from `happy daemon list` | SIGTERM — the daemon can never adopt it |
+| idle | tracked, but no `SessionMessage` newer than `IDLE_DAYS` (default **3**, set in the unit) | SIGTERM |
+| in use | tracked with a recent message, **at any process age** | left alone |
+
+⚠️ **Idleness must come from the relay DB, never from process age.** A session legitimately in daily use runs for weeks here — the 5d-20h session above had a message 4h old and is correctly *kept*. The script reads `max(SessionMessage."createdAt")` (falling back to `Session."createdAt"`), i.e. timestamps only; message bodies are E2E-encrypted and never touched.
+
+**Why SIGTERM and not `kill -9`:** the CLI's SIGTERM path calls `POST /v1/sessions/:id/archive`, so the row is marked `active=false` cleanly instead of lingering active until the 10-min server timeout. Verified end to end on 2026-10-04: archive request at `20:56:20.491`, DB `active=false` at `20:56:20.494`. SIGKILL only after a 15s grace, plus a sweep for a child `claude` that outlived its parent.
+
+Guards, each of which exists because of a specific failure mode:
+- **Daemon down → exit 0 immediately.** With no `daemon list` to compare against, *every* live session would look like an orphan. The `ExecStartPre` reaper owns the restart case.
+- **`MIN_AGE_SECONDS` (default 600)** — a session spawned seconds ago may not be registered yet, and would otherwise be killed as an orphan.
+- **Only the `node` process is eligible.** A shell wrapper (`bash -c …`, e.g. tmux) carries the same argv; signalling it would SIGKILL the real session through the child sweep and skip the archive call. Found while testing.
+- **Relay DB unreachable → idle branch skipped**, orphans still reaped; the script always exits 0 so the timer cannot flap.
+
+⚠️ **Never let a command inside the process loop read stdin.** `docker exec -i` did, swallowing the rest of the `pgrep` list so only the *first* process was ever examined — the script silently did almost nothing. The list is now snapshotted into `$candidates` before the loop and every `docker exec` runs with `</dev/null`.
+
+```bash
+DRY_RUN=1 /usr/local/bin/happy-reap-sessions.sh              # decisions only, no signals
+DRY_RUN=1 IDLE_DAYS=0 /usr/local/bin/happy-reap-sessions.sh  # proves the idle branch selects
+journalctl -u happy-reap -n 20                               # what it reaped and why
+systemctl list-timers 'happy-*'
+```
 
 ### Known gotchas
 
