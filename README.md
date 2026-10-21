@@ -169,7 +169,7 @@ Auth credentials are saved to **`~/.happy/`** (`access.key` plus `settings.json`
 > - **ordering + readiness** — `After=docker.service` plus an `ExecStartPre` that polls your relay URL, so the daemon doesn't start before the relay answers (its machine registration otherwise times out and the process exits);
 > - **a liveness timer** — a 5-minute timer that matches on `happy daemon status` output and restarts the unit when the daemon is gone (use `systemctl restart --no-block`, or the restart can deadlock against the timer's own unit);
 > - **log pruning** — happy writes one log per process and never reopens them, so prune by age *and* size *and* count; a long-lived session log can reach hundreds of MB;
-> - **a session reaper** — daemon-spawned sessions never exit on their own and are not adopted across a daemon restart, so they leak 150–250 MB each until killed.
+> - **a session reaper** — daemon-spawned sessions never exit on their own and are not adopted across a daemon restart, so they leak 150–250 MB each until killed. Decide idleness from the relay DB (newest `SessionMessage` timestamp), **never** from process age — a session in daily use legitimately runs for weeks — and signal SIGTERM rather than SIGKILL so the CLI's handler can call `/v1/sessions/:id/archive` and mark the row inactive cleanly.
 >
 > Each of these is implemented and explained in `CLAUDE.md` for the `home8` instance, including the traps (systemd eats `${VAR:-default}`; `$$(seq …)` for a literal `$`).
 

@@ -192,7 +192,7 @@ At `ExecStartPre` time the new daemon isn't running yet, so every `--started-by 
 
 This only fires **at restart** — it does not reap orphans that pile up *between* restarts. The liveness watchdog does **not** cover this: during the 1.2.0 upgrade the daemon was alive and healthy the whole time; it was the *sessions* that leaked. `happy doctor clean` remains the manual sledgehammer (kills **all** happy processes — run when nothing is mid-flight). After editing the drop-in: `systemctl daemon-reload`.
 
-#### Periodic reaper: `happy-reap.timer` (#12, added 2026-10-04)
+#### Periodic reaper: `happy-reap.timer` (added 2026-10-04, ✅ verified 2026-10-21)
 
 `/usr/local/bin/happy-reap-sessions.sh`, every 30 min (`OnBootSec=5min`), covers what the restart-time reaper cannot — sessions that accumulate *between* restarts. Measured trigger: on 2026-10-04 one tracked session had been alive **5d 20h** holding ~440 MB across its `happy` + child `claude`, and `/root/.happy/logs` was back to **1.0 GB / 2,382 files** (one log alone 582 MB).
 
@@ -206,7 +206,9 @@ Two cases, both only for `--started-by daemon` processes:
 
 ⚠️ **Idleness must come from the relay DB, never from process age.** A session legitimately in daily use runs for weeks here — the 5d-20h session above had a message 4h old and is correctly *kept*. The script reads `max(SessionMessage."createdAt")` (falling back to `Session."createdAt"`), i.e. timestamps only; message bodies are E2E-encrypted and never touched.
 
-**Why SIGTERM and not `kill -9`:** the CLI's SIGTERM path calls `POST /v1/sessions/:id/archive`, so the row is marked `active=false` cleanly instead of lingering active until the 10-min server timeout. Verified end to end on 2026-10-04: archive request at `20:56:20.491`, DB `active=false` at `20:56:20.494`. SIGKILL only after a 15s grace, plus a sweep for a child `claude` that outlived its parent.
+**Why SIGTERM and not `kill -9`:** the CLI's SIGTERM path calls `POST /v1/sessions/:id/archive`, so the row is marked `active=false` cleanly instead of lingering active until the 10-min server timeout. Verified end to end on 2026-10-04 against an orphan: archive request at `20:56:20.491`, DB `active=false` at `20:56:20.494`. SIGKILL only after a 15s grace, plus a sweep for a child `claude` that outlived its parent.
+
+✅ **The idle branch is confirmed by a natural trigger, not just `IDLE_DAYS=0`.** A session left untouched from 2026-10-18 was kept at 64h/65h/…/71h idle and reaped on the first run past the cutoff — `18:11:23 reaping reason=idle 3d children=[…]`, DB `active=false` at `18:11:23.445`, parent and child both gone. Over the first 17 days the timer logged ~820 runs, **0 errors and exactly 1 reap** — every session in real use was correctly left alone, which is the behaviour that matters most here. `/root/.happy/logs` went 1.0 GB → 78 MB across the same window (the pruner's size rule doing its half once the reaper stopped feeding it giant live logs).
 
 Guards, each of which exists because of a specific failure mode:
 - **Daemon down → exit 0 immediately.** With no `daemon list` to compare against, *every* live session would look like an orphan. The `ExecStartPre` reaper owns the restart case.
