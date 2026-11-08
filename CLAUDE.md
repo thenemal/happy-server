@@ -356,8 +356,15 @@ docker compose exec -T postgres pg_dump -U happy -Fc happy > /root/happy-backups
 ```
 
 **Rollback to the fork**, which tolerates the additive upstream schema:
-1. Rebuild the fork image from the `fork-final` tag (its `Dockerfile` builds the old server), or use a saved `happy-server:fork-<sha>` tag.
-2. Set `image: happy-server:fork-<sha>` in compose. The fork's own `node_modules/.bin/prisma migrate deploy && yarn start` command is safe here. The rehearsal on Sunday, 2026-11-08 showed fork prisma 6.11 reports "No pending migrations" against a DB that has the 3 extra upstream migrations, and the fork then served sessions and v3 messages normally.
+⚠️ **Changing only `image:` crash-loops.** The current `command:` uses `pnpm exec prisma`, and the fork image has no `pnpm`, only `yarn`. Restore the fork's **whole** compose file and swap `build:` for the saved image:
+
+```bash
+cd /root/happy-server
+git show fork-final:docker-compose.yml | sed 's|^    build: \.|    image: happy-server:fork-38f4b94|' > docker-compose.yml
+docker compose up -d happy-server && systemctl restart happy
+```
+
+This is safe on the migrated DB. The rehearsal on Sunday, 2026-11-08 showed the fork's `prisma migrate deploy` (prisma 6.11) reports "No pending migrations" against a DB that has the 3 extra upstream migrations, and the fork then served sessions and v3 messages normally. If the `happy-server:fork-38f4b94` tag is gone, rebuild it from a checkout of `fork-final`: `docker build -t happy-server:fork-38f4b94 .`. The rewritten compose was checked with `docker compose config -q`; it has not been run.
 
 Full DB restore (this **loses post-cutover data**): stop `happy-server`, `dropdb`/`createdb`, `pg_restore --no-owner` the dump. Detailed steps are in the #7 plan comment.
 
