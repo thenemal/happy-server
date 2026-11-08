@@ -232,7 +232,7 @@ systemctl list-timers 'happy-*'
   - The background `GET /` from `app.happy.engineering` gets a **503 `text/html` block page** carrying `P3P: CP="CAO PSA OUR"` and `Expires: 1970`. It has no `via: 1.1 Caddy` and no CORS header.
   - Opening home8 directly in a tab works, and so does the same-origin web app on home10.
   - Tell-tale: any 503 without `via: 1.1 Caddy` didn't come from us.
-  - The way around it is the same-origin web portal on home8 — see *Self-hosted web portal (#3)*.
+  - Fixed by the same-origin web portal on home8 (✅ verified 2026-11-08) — see *Self-hosted web portal (#3)*.
 - **`HAPPY_SERVER_URL` not set before auth** — CLI registers keypair on the default server; web/mobile (pointing at yours) can't find the auth request. Always set the env var first.
 - **`ai-permission-hook` is active** — tool permissions are auto-resolved server-side; the web/mobile "Permissions shown in terminal only" banner is expected and harmless.
 - **"Process exited unexpectedly" / daemon sessions die instantly (root guard)** — the daemon runs as **root** in this LXC, and the happy SDK spawns claude with `--permission-mode bypassPermissions` (→ `--dangerously-skip-permissions`). Claude Code refuses that as root: `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`, so every daemon-spawned session exits code 1 the moment it tries to think. **Fix:** tell Claude Code it's in a container by setting `IS_SANDBOX=1` in the daemon's systemd environment (drop-in below) — this lifts the root guard. Legitimate here: we *are* in an LXC, and remote-session permissions are handled by happy + `ai-permission-hook`, not interactively. Confirm with `systemctl show happy -p Environment` (should list `IS_SANDBOX=1`).
@@ -379,7 +379,7 @@ Full DB restore (this **loses post-cutover data**): stop `happy-server`, `dropdb
 
 **Why:** the work laptop's corporate gateway blocks the cross-site call from `app.happy.engineering` to home8 (see Known gotchas). Serving the web client from home8 itself removes every cross-site request.
 
-**Status:** ⚠️ live on `https://home8.compagnie-lily.org` since Sunday, 2026-11-08 (external Caddy → `192.168.45.20:3006`; `import handle-security` adds no CSP). The test matrix passes on both :3006 and home8, and the daemon stayed up. Still unverified: Seb on the work laptop.
+**Status:** ✅ live on `https://home8.compagnie-lily.org` since Sunday, 2026-11-08 (external Caddy → `192.168.45.20:3006`; `import handle-security` adds no CSP), and **verified by Seb on the work laptop** the same day: the QR shows, login works, sessions sync live. The test matrix passes on both :3006 and home8.
 
 **Pieces:**
 - `WEB_SHA` → `c33cc63c` (2026-10-31), the **last** commit of `packages/happy-app`. Upstream deleted the RN/Expo app in `e46a907d` (2026-11-05), so this client is **frozen**. Re-verify it on every `UPSTREAM_SHA` bump.
