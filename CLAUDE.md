@@ -379,7 +379,7 @@ Full DB restore (this **loses post-cutover data**): stop `happy-server`, `dropdb
 
 **Why:** the work laptop's corporate gateway blocks the cross-site call from `app.happy.engineering` to home8 (see Known gotchas). Serving the web client from home8 itself removes every cross-site request.
 
-**Status:** ⚠️ deployed on :3006 and passing the local test matrix (Sunday, 2026-11-08); the external Caddy flip and Seb's work-laptop test are still pending.
+**Status:** ⚠️ live on `https://home8.compagnie-lily.org` since Sunday, 2026-11-08 (external Caddy → `192.168.45.20:3006`; `import handle-security` adds no CSP). The test matrix passes on both :3006 and home8, and the daemon stayed up. Still unverified: Seb on the work laptop.
 
 **Pieces:**
 - `WEB_SHA` → `c33cc63c` (2026-10-31), the **last** commit of `packages/happy-app`. Upstream deleted the RN/Expo app in `e46a907d` (2026-11-05), so this client is **frozen**. Re-verify it on every `UPSTREAM_SHA` bump.
@@ -410,7 +410,7 @@ docker compose up -d --no-deps portal
 - `/v1/updates/?EIO=4&transport=polling` → 200; websocket upgrade → 101
 - `POST /v1/auth/account/request` → 200; `OPTIONS` with `Origin: https://app.happy.engineering` → `Access-Control-Allow-Origin` present
 
-**External Caddy (other host, proxmox-manager lane):** home8's upstream moves from CT 111 `:3005` to `:3006`. **Rollback:** point it back at `:3005`. Port 3005 stays published, and nothing else depends on the portal.
+**External Caddy (other host, proxmox-manager lane, `/etc/caddy/Caddyfile`):** `home8.compagnie-lily.org { import handle-security; reverse_proxy 192.168.45.20:3006 }`, flipped from `:3005` on 2026-11-08. **Rollback:** point it back at `:3005`. Port 3005 stays published, and nothing else depends on the portal.
 
 **Known risks:**
 - The socket.io client is `transports: ['websocket']` only. If the corporate gateway also kills same-origin `wss://`, login works but nothing syncs live. Fix then: patch the bundle at build time to `['polling','websocket']`.
