@@ -239,6 +239,13 @@ systemctl list-timers 'happy-*'
 
 **This repo no longer contains server source.** The relay runs **upstream** `slopus/happy` `packages/happy-server`, built locally from the commit in `UPSTREAM_SHA` by `./build-upstream.sh` into `happy-server:upstream-<short>`. Until 2026-11 this repo was a fork of the standalone `slopus/happy-server`. That repo was archived on 2026-02-14 because it **merged into the monorepo**, not because the project died. The fork's last state is tagged **`fork-final`**, which is how the rollback image gets rebuilt.
 
+**Status:** ✅ cut over at Sunday, 2026-11-08 06:28 UTC, and **verified by Seb** the same day from mobile:
+- a long session opens on its newest page
+- push arrives while the app is backgrounded
+- a stopped session goes inactive
+
+The 3 upstream migrations were applied to prod. The pre-cutover dump is `/root/happy-backups/pre-upstream-2026-11-08.dump`. The old image is kept as `happy-server:fork-38f4b94`. The rehearsal on a restored copy showed the fork image runs fine on the migrated schema, so rollback means changing the compose `image:` to it. Once the upstream image has proven itself for a few weeks, the fork tag and the dumps can go.
+
 **Why the fork was dropped.** Every patch it carried turned out to be a hand-port of something upstream already had:
 - v3 messages, including `before_seq` (#15)
 - `DELETE /v1/machines/:id`
@@ -297,7 +304,7 @@ happy server
 Caveat before switching: `happy-server-self-host` was still **1.1.11** as of 2026-10-01 while the CLI is already **1.2.5**, so it *lags the client badly* — the same class of gap the old fork kept hitting. Migration also means moving existing Postgres/MinIO data into PGlite/local files — not a drop-in for a running instance with history. Relevant docs in the monorepo: `docs/deployment.md`, `docs/backend-architecture.md`, `docs/api.md`, `docs/protocol.md`, `docs/plans/happy-serve-self-host.md`.
 
 Two gotchas when checking upstream from this repo:
-- **`gh` targets the wrong repo by default here, and the `upstream` remote is stale.** With both `origin` (`thenemal/happy-server`) and `upstream` (`slopus/happy-server`) remotes, `gh` prefers `upstream`. Drop the stale remote with `git remote remove upstream` once on the upstream image; it serves no purpose now — so a bare `gh issue create` silently tries the *archived* repo and fails with "Repository was archived so is read-only". Pinned via `git config remote.origin.gh-resolved base`; verify with `gh repo view --json nameWithOwner`. Note the `upstream` remote itself now points at a dead repo — real upstream is `slopus/happy` `packages/happy-server/`.
+- **Don't re-add an `upstream` remote.** On Sunday, 2026-11-08 the clone had an `upstream` remote pointing at the archived `slopus/happy-server`. `gh` preferred it over `origin`, so a bare `gh issue create` failed with "Repository was archived so is read-only". The remote was removed that day and only `origin` remains. Real upstream is `slopus/happy` (`packages/happy-server/`), and its checkout lives at `/root/happy-upstream`, managed by `build-upstream.sh`. If `gh` ever targets the wrong repo again, check `gh repo view --json nameWithOwner`.
 - **`happy --version` is misleading** — it passes through to Claude Code and prints *that* version. For the real CLI version use `node -p "require('/usr/local/lib/node_modules/happy/package.json').version"`, or read `startedWithCliVersion` from `happy daemon status`.
 
 **Client compatibility:** verified 2026-08-18 against happy CLI **1.2.0** (upgraded from 1.1.10 that day). Before upgrading, the API surface of both tarballs was diffed rather than assumed: **9 base endpoints and 7 constructed sub-routes, identical in both** — including the patched `v3/sessions/:id/messages` — and the same `@anthropic-ai/claude-agent-sdk` constraint (`^0.3.179`). Post-upgrade the daemon registers, holds its WebSocket, and the relay answers 200. The v3 patch is still needed and still works.
