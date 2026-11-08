@@ -280,13 +280,19 @@ Parity was checked route by route on Sunday, 2026-11-08 against `41cdc0a`. The f
 
 **Tests** live upstream (`*.spec.ts` / `*.test.ts` next to the sources). Run them from the builder stage of `/root/happy-upstream`, not here.
 
-**Still missing: attachments.** In S3 mode upstream returns presigned URLs signed for `S3_HOST`, and `S3_HOST=minio` is unreachable from clients. So image attachments still fail, same as before the switch. The fix is upstream's `0f74546` pattern: point `S3_HOST` at a public MinIO hostname through Caddy, preserving the Host header. That is phase 2, a separate issue.
+**Still missing: attachments.** In S3 mode upstream returns presigned URLs signed for `S3_HOST`, and `S3_HOST=minio` is unreachable from clients. So image attachments still fail, same as before the switch. The fix is upstream's `0f74546` pattern: point `S3_HOST` at a public MinIO hostname through Caddy, preserving the Host header. That is phase 2, tracked in #19.
 
 #### Scheduled upstream watch (cloud routine)
 
-A claude.ai cloud routine, **`happy-server upstream watch`** (`trig_017YePh7geaUJiqC8jQVPYpS`), runs on the 1st of each month at 08:00 UTC (`0 8 1 * *`) — it is **not** a local cron or systemd timer, so `crontab -l` / `systemctl list-timers` won't show it. List/inspect it via the `RemoteTrigger` tool (or claude.ai/code/routines). It checks out this repo read-only and emails Seb **only** when something is new: `packages/happy-server` commits in `slopus/happy` over the last 35 days, relevant PRs, new `happy` / `happy-server-self-host` npm versions, or API/protocol/migration changes. Quiet months send nothing.
+A claude.ai cloud routine, **`happy-server upstream watch`** (`trig_017YePh7geaUJiqC8jQVPYpS`), runs on the 1st of each month at 04:00 America/New_York (`CRON_TZ=America/New_York 0 4 1 * *`, i.e. 08:00 or 09:00 UTC) — it is **not** a local cron or systemd timer, so `crontab -l` / `systemctl list-timers` won't show it. List/inspect it via the `RemoteTrigger` tool (or claude.ai/code/routines). It checks out this repo read-only and emails Seb **only** when something is new: `packages/happy-server` commits in `slopus/happy` over the last 35 days, relevant PRs, new `happy` / `happy-server-self-host` npm versions, or API/protocol/migration changes. Quiet months send nothing.
 
-⚠️ **Until 2026-09-13 it watched the archived `slopus/happy-server`**, so it was structurally incapable of alerting — every "silent" month before that date means nothing. Rewritten that day to target the monorepo, with a baseline embedded in the prompt. **Baseline moved 2026-10-04** to upstream server commit `8ce230c` (2026-09-20); npm `happy` 1.2.5, `happy-server-self-host` 1.1.11; known-and-ignored gaps now include the session-avatar routes/columns and `projectRoutes.ts`, plus open upstream PR #1837. **When the baseline moves** (CLI upgrade, an `UPSTREAM_SHA` bump), update the prompt's baseline section too, or it will keep reporting already-known items.
+⚠️ **Until 2026-09-13 it watched the archived `slopus/happy-server`**, so it was structurally incapable of alerting — every "silent" month before that date means nothing. Rewritten that day to target the monorepo, with a baseline embedded in the prompt. **Rewritten again on Sunday, 2026-11-08 for the upstream-image setup.** Its job is now to answer "is a newer upstream worth bumping `UPSTREAM_SHA` to, and does that bring migrations?". New baseline:
+- pin `41cdc0a`; last server commit `acc653b` (2026-11-06)
+- 39 migrations deployed, newest `20260914090000_add_session_avatars`; any newer migration is flagged with an additive/destructive verdict
+- npm `happy` 1.2.6, `happy-server-self-host` 1.1.11
+- known and ignored: attachments (phase 2) and open upstream PR #1837
+
+First run on the new prompt: Tuesday, 2026-12-01. **When the baseline moves** (CLI upgrade, an `UPSTREAM_SHA` bump), update the prompt's baseline section too, or it will keep reporting already-known items.
 
 ⚠️ **The cloud sandbox cannot use the GitHub API for repos not attached to the routine.** Only `thenemal/happy-server` is attached, so `api.github.com/repos/slopus/happy/...` returns 403 from both `curl` and WebFetch, and the GitHub MCP tools refuse it ("not configured for this session"). What *does* work (verified in the 2026-09-13 test run): **WebFetch on plain `github.com` HTML pages** (`/slopus/happy/commits/main/packages/happy-server`, `/tree/...`, `/pulls?q=...`) and on **`registry.npmjs.org/<pkg>/latest`** (the full package document gets truncated — use `/latest`). The prompt spells these URLs out; don't "simplify" it back to `curl api.github.com`, or the routine will fail and — worse — may read the failure as "nothing new". The prompt also makes a failed fetch an email-worthy event for that reason.
 
@@ -378,7 +384,7 @@ Deliberately unset:
 ## Debugging
 
 **404s no longer show up in `docker compose logs`.** Upstream `eb980a5c` ("minimize production logs") sets `disableRequestLogging` and log level `error` when `NODE_ENV=production`. The only trace is an aggregate `2xx=/4xx=/5xx=` count in a periodic summary line, with no paths. That breaks the old client-drift check, which relied on seeing a 404 for a route the clients call. To see request paths:
-- the **Caddy access log** for home8 (Caddy runs on another host), recommended as the standing replacement
+- the **Caddy access log** for home8 (Caddy runs on another host), recommended as the standing replacement (#20)
 - temporarily set `DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING=1`, which writes debug-level logs to `.logs/` inside the container, then `docker compose up -d happy-server`
 
 ```bash
