@@ -228,6 +228,11 @@ systemctl list-timers 'happy-*'
 ### Known gotchas
 
 - **Trailing slash in web app server URL** — causes `//v1/...` double-slash 404s. Enter URL without trailing slash.
+- **Web app "Failed to connect to server" on the work laptop is the corporate gateway, not the relay** (diagnosed Sunday, 2026-11-08):
+  - The background `GET /` from `app.happy.engineering` gets a **503 `text/html` block page** carrying `P3P: CP="CAO PSA OUR"` and `Expires: 1970`. It has no `via: 1.1 Caddy` and no CORS header.
+  - Opening home8 directly in a tab works, and so does the same-origin web app on home10.
+  - Tell-tale: any 503 without `via: 1.1 Caddy` didn't come from us.
+  - The way around it is a same-origin web client on home8 (#3).
 - **`HAPPY_SERVER_URL` not set before auth** — CLI registers keypair on the default server; web/mobile (pointing at yours) can't find the auth request. Always set the env var first.
 - **`ai-permission-hook` is active** — tool permissions are auto-resolved server-side; the web/mobile "Permissions shown in terminal only" banner is expected and harmless.
 - **"Process exited unexpectedly" / daemon sessions die instantly (root guard)** — the daemon runs as **root** in this LXC, and the happy SDK spawns claude with `--permission-mode bypassPermissions` (→ `--dangerously-skip-permissions`). Claude Code refuses that as root: `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`, so every daemon-spawned session exits code 1 the moment it tries to think. **Fix:** tell Claude Code it's in a container by setting `IS_SANDBOX=1` in the daemon's systemd environment (drop-in below) — this lifts the root guard. Legitimate here: we *are* in an LXC, and remote-session permissions are handled by happy + `ai-permission-hook`, not interactively. Confirm with `systemctl show happy -p Environment` (should list `IS_SANDBOX=1`).
