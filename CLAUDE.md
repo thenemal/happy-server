@@ -37,7 +37,7 @@ Add to `~/.bashrc` to make permanent.
 
 **Mobile app** — Settings → Relay Server URL → `https://home8.compagnie-lily.org`
 
-**Web app** — go to `https://app.happy.engineering/server`, enter `https://home8.compagnie-lily.org` (no trailing slash), then authenticate.
+**Web app** — open `https://home8.compagnie-lily.org` in a browser: the self-hosted portal is pre-pointed at this relay (see *Self-hosted web portal (#3)*). Alternatively `https://app.happy.engineering/server`, enter `https://home8.compagnie-lily.org` (no trailing slash), then authenticate — but that is cross-site and blocked on the work laptop.
 
 ### Linking a machine for the first time
 
@@ -232,7 +232,7 @@ systemctl list-timers 'happy-*'
   - The background `GET /` from `app.happy.engineering` gets a **503 `text/html` block page** carrying `P3P: CP="CAO PSA OUR"` and `Expires: 1970`. It has no `via: 1.1 Caddy` and no CORS header.
   - Opening home8 directly in a tab works, and so does the same-origin web app on home10.
   - Tell-tale: any 503 without `via: 1.1 Caddy` didn't come from us.
-  - The way around it is a same-origin web client on home8 (#3).
+  - The way around it is the same-origin web portal on home8 — see *Self-hosted web portal (#3)*.
 - **`HAPPY_SERVER_URL` not set before auth** — CLI registers keypair on the default server; web/mobile (pointing at yours) can't find the auth request. Always set the env var first.
 - **`ai-permission-hook` is active** — tool permissions are auto-resolved server-side; the web/mobile "Permissions shown in terminal only" banner is expected and harmless.
 - **"Process exited unexpectedly" / daemon sessions die instantly (root guard)** — the daemon runs as **root** in this LXC, and the happy SDK spawns claude with `--permission-mode bypassPermissions` (→ `--dangerously-skip-permissions`). Claude Code refuses that as root: `--dangerously-skip-permissions cannot be used with root/sudo privileges for security reasons`, so every daemon-spawned session exits code 1 the moment it tries to think. **Fix:** tell Claude Code it's in a container by setting `IS_SANDBOX=1` in the daemon's systemd environment (drop-in below) — this lifts the root guard. Legitimate here: we *are* in an LXC, and remote-session permissions are handled by happy + `ai-permission-hook`, not interactively. Confirm with `systemctl show happy -p Environment` (should list `IS_SANDBOX=1`).
@@ -273,6 +273,7 @@ Parity was checked route by route on Sunday, 2026-11-08 against `41cdc0a`. The f
 3. Update `UPSTREAM_SHA`, run `./build-upstream.sh`, and update the `image:` tag in `docker-compose.yml`.
 4. `docker compose up -d happy-server`. Its command runs `prisma migrate deploy` first, so **the first start of a new image is the migration step.**
 5. `systemctl restart happy`, then verify: `happy daemon status`, plus a mobile session open and a push.
+6. **Re-verify the web portal** (`https://home8.compagnie-lily.org` in a browser: sessions list, a session opens, live updates). Its client is frozen at `WEB_SHA` while the server moves; see *Self-hosted web portal (#3)*.
 
 **Local patches**, only if upstream truly lacks a fix: put `*.patch` files in `patches/`. `build-upstream.sh` applies them on top of the pin. Keep the directory empty otherwise, because every patch is a re-port waiting to happen.
 
@@ -310,7 +311,7 @@ npm install -g happy happy-server-self-host
 happy server
 ```
 
-`happy server` discovers the package and runs the sync server **plus the bundled web app** on embedded **PGlite** storage with local-filesystem uploads — **no Postgres, no Redis, no S3** — and writes `settings.serverUrl` so the CLI and daemon target it. That replaces this repo's four-container stack (`happy-server` + `postgres` + `redis` + `minio`) and would also retire the separate self-hosted-web-app work in issue #3, since the web app ships with it.
+`happy server` discovers the package and runs the sync server on embedded **PGlite** storage with local-filesystem uploads — **no Postgres, no Redis, no S3** — and writes `settings.serverUrl` so the CLI and daemon target it. That would replace this repo's four-container stack (`happy-server` + `postgres` + `redis` + `minio`). Version 1.1.11 also bundled a web app, but upstream `e46a907d` (2026-11-05) removed `webapp/` from the package along with the app source, so future releases are server-only and do **not** retire the portal (#3).
 
 Caveat before switching: `happy-server-self-host` was still **1.1.11** as of 2026-10-01 while the CLI is already **1.2.5**, so it *lags the client badly* — the same class of gap the old fork kept hitting. Migration also means moving existing Postgres/MinIO data into PGlite/local files — not a drop-in for a running instance with history. Relevant docs in the monorepo: `docs/deployment.md`, `docs/backend-architecture.md`, `docs/api.md`, `docs/protocol.md`, `docs/plans/happy-serve-self-host.md`.
 
@@ -343,6 +344,7 @@ Managed via Docker Compose at `/root/happy-server/docker-compose.yml`. Services:
 - `redis`: also the socket.io streams adapter
 - `minio`: port 9000 API / 9001 console
 - `minio-init`: one-shot bucket init
+- `portal`: same-origin gateway on port 3006 — web app + reverse proxy to `happy-server` (see below)
 
 Secrets live in `/root/happy-server/.env` (gitignored). **Always run compose from `/root/happy-server`.** The project name `happy-server` prefixes the volumes (`happy-server_postgres_data`, ...); running it from another directory, a worktree included, would create a fresh empty stack.
 
@@ -372,6 +374,47 @@ docker compose up -d happy-server && systemctl restart happy
 This is safe on the migrated DB. The rehearsal on Sunday, 2026-11-08 showed the fork's `prisma migrate deploy` (prisma 6.11) reports "No pending migrations" against a DB that has the 3 extra upstream migrations, and the fork then served sessions and v3 messages normally. If the `happy-server:fork-38f4b94` tag is gone, rebuild it from a checkout of `fork-final`: `docker build -t happy-server:fork-38f4b94 .`. The rewritten compose was checked with `docker compose config -q`; it has not been run.
 
 Full DB restore (this **loses post-cutover data**): stop `happy-server`, `dropdb`/`createdb`, `pg_restore --no-owner` the dump. Detailed steps are in the #7 plan comment.
+
+### Self-hosted web portal (#3)
+
+**Why:** the work laptop's corporate gateway blocks the cross-site call from `app.happy.engineering` to home8 (see Known gotchas). Serving the web client from home8 itself removes every cross-site request.
+
+**Status:** ⚠️ deployed on :3006 and passing the local test matrix (Sunday, 2026-11-08); the external Caddy flip and Seb's work-laptop test are still pending.
+
+**Pieces:**
+- `WEB_SHA` → `c33cc63c` (2026-10-31), the **last** commit of `packages/happy-app`. Upstream deleted the RN/Expo app in `e46a907d` (2026-11-05), so this client is **frozen**. Re-verify it on every `UPSTREAM_SHA` bump.
+- `./build-portal.sh` checks `WEB_SHA` out in `/root/happy-upstream` (shared with `build-upstream.sh`; each script resets it to its own pin). It builds upstream's own `Dockerfile.webapp` `--target builder` (`expo export -p web`, ~10 min) with `HAPPY_SERVER_URL=https://home8…` baked in. Then `portal/Dockerfile` copies the export into `caddy:2.10-alpine`, injecting `window.__HAPPY_CONFIG__={"serverUrl":"https://home8…","disableAnalytics":true}` into `index.html`. Result: `happy-portal:web-<short>` (~125 MB); the multi-GB builder image is deleted.
+- The client resolves its server as `localStorage custom-server-url` → `__HAPPY_CONFIG__.serverUrl` → build-time default → cluster-fluster. A fresh home8 origin therefore needs no `/server` step.
+- `portal/Caddyfile` routing:
+
+| Request | Target |
+|---|---|
+| `/v1*` (incl. socket.io `/v1/updates`), `/v2*`, `/v3*`, `/files/*`, `/health`, `/logs-combined-…` | `happy-server:3005` (`flush_interval -1`, websockets pass through) |
+| `/` with `Accept` containing `text/html` | portal `index.html` |
+| `/` otherwise | `happy-server:3005` banner |
+| anything else | static file, else `index.html` (SPA fallback) |
+
+⚠️ **`/` must keep serving the banner to non-browser requests.** Server validation (the app's `/server` page, the phone's relay-URL check) does `GET /` with `Accept: text/plain` and requires `Welcome to Happy Server!`; the systemd `wait-for-relay` probe needs a 2xx. An unknown `/v1/x` must stay the API's JSON 404, never `index.html`.
+
+⚠️ **Upstream `HAPPY_STATIC_DIR` is not usable here.** It only works in `standalone.ts`, and our image starts through `main.ts` → `startApi()` with no options. Enabling it would also drop the `/` banner.
+
+**Operate (always scoped, so happy-server is never recreated and `migrate deploy` never reruns):**
+```bash
+./build-portal.sh
+docker compose up -d --no-deps portal
+```
+
+**Test matrix** (against `http://localhost:3006`, then `https://home8…`):
+- `/` with `Accept: text/html` → HTML containing `__HAPPY_CONFIG__`; with `text/plain` and with `*/*` → banner
+- `/v1/does-not-exist` → JSON 404; `/settings` → HTML; an `_expo/.../index-*.js` → 200 JS, immutable cache
+- `/v1/updates/?EIO=4&transport=polling` → 200; websocket upgrade → 101
+- `POST /v1/auth/account/request` → 200; `OPTIONS` with `Origin: https://app.happy.engineering` → `Access-Control-Allow-Origin` present
+
+**External Caddy (other host, proxmox-manager lane):** home8's upstream moves from CT 111 `:3005` to `:3006`. **Rollback:** point it back at `:3005`. Port 3005 stays published, and nothing else depends on the portal.
+
+**Known risks:**
+- The socket.io client is `transports: ['websocket']` only. If the corporate gateway also kills same-origin `wss://`, login works but nothing syncs live. Fix then: patch the bundle at build time to `['polling','websocket']`.
+- The bundle references other origins (RevenueCat, Expo, jsdelivr). Those calls fail on the work laptop; none is on the login/QR path.
 
 ## Environment Variables
 
