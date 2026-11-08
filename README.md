@@ -1,6 +1,6 @@
 # Happy Server
 
-Minimal backend for open-source end-to-end encrypted Claude Code clients.
+Deployment config for a self-hosted [Happy](https://github.com/slopus/happy) relay — the minimal backend for open-source end-to-end encrypted Claude Code clients. The server code is upstream `slopus/happy` `packages/happy-server`, pinned in `UPSTREAM_SHA`.
 
 ## What is Happy?
 
@@ -198,9 +198,12 @@ Work through this order before touching Caddy or the proxy:
 
 ## Self-Hosting
 
+This repo holds **deployment config only**. The server itself is upstream [`slopus/happy`](https://github.com/slopus/happy) `packages/happy-server`, built locally from the commit pinned in [`UPSTREAM_SHA`](UPSTREAM_SHA). Until November 2026 it was a fork of the standalone `slopus/happy-server`, which was archived when it merged into the monorepo. The fork's last state is tagged `fork-final`.
+
 ### Prerequisites
 
 - Docker + Docker Compose
+- ~6 GB free disk for the server image
 - A domain name with DNS pointed at your server
 - A reverse proxy (Caddy, nginx, etc.) for HTTPS
 
@@ -223,9 +226,15 @@ Work through this order before touching Caddy or the proxy:
    MINIO_ROOT_PASSWORD=<openssl rand -hex 16>
    ```
 
-   > **Keep `HANDY_MASTER_SECRET` safe** — it's used to derive all encryption keys. Losing it means losing access to all stored tokens.
+   > **Keep `HANDY_MASTER_SECRET` safe and never change it.** It seeds both the encryption keys and the auth token generator. If you change it, every client has to re-authenticate.
 
-3. **Start the stack:**
+3. **Build the server image** from the pinned upstream commit:
+
+   ```bash
+   ./build-upstream.sh    # clones slopus/happy to /root/happy-upstream, builds happy-server:upstream-<sha>
+   ```
+
+4. **Start the stack:**
 
    ```bash
    docker compose up -d
@@ -233,7 +242,7 @@ Work through this order before touching Caddy or the proxy:
 
    This starts happy-server (port 3005), PostgreSQL, Redis, and MinIO (port 9000). Database migrations run automatically on startup.
 
-4. **Reverse proxy config** (Caddy example):
+5. **Reverse proxy config** (Caddy example):
 
    ```
    your-domain.com {
@@ -245,22 +254,30 @@ Work through this order before touching Caddy or the proxy:
    }
    ```
 
-   Set `S3_PUBLIC_URL=https://files.your-domain.com/happy` in your `.env` to match.
+   In `docker-compose.yml`, set `S3_PUBLIC_URL=https://files.your-domain.com/happy` and `PUBLIC_URL=https://your-domain.com` to match. Keep `S3_HOST` set: without it, upstream silently falls back to local-disk storage.
 
-5. **Point the Happy app** at `https://your-domain.com`.
+6. **Point the Happy app** at `https://your-domain.com`.
 
-### Updating
+### Updating (bumping the upstream pin)
 
-```bash
-git pull
-docker compose up -d --build
-```
+1. Pick the new commit, and check it for new Prisma migrations under `packages/happy-server/prisma/migrations`.
+2. **If it has new migrations, `pg_dump` first.** The first start of the new image applies them.
+3. Then:
 
-Only the server rebuilds; Postgres, Redis and MinIO keep running. `prisma migrate deploy` runs on container start.
+   ```bash
+   echo <new-sha> > UPSTREAM_SHA
+   ./build-upstream.sh
+   # update the image: tag in docker-compose.yml to happy-server:upstream-<short-sha>
+   docker compose up -d happy-server
+   ```
+
+Only the server is replaced; Postgres, Redis and MinIO keep running.
+
+If upstream lacks a fix you need, drop a `*.patch` into `patches/`. `build-upstream.sh` applies it on top of the pin. Keep that directory empty otherwise.
 
 ### Keeping up with the clients
 
-The happy CLI and apps ship faster than this fork, and a client calling an endpoint the server lacks just gets a 404 — which the CLI often logs at debug level only, so a feature can be silently dead (session push notifications were, for months). Before upgrading the CLI, diff the client's API surface against the routes this server actually registers:
+The happy CLI and apps can ship ahead of the pinned server. A client calling an endpoint the server lacks just gets a 404, which the CLI often logs at debug level only, so a feature can be silently dead. Before upgrading the CLI, diff its API surface against the routes the pinned server registers:
 
 ```bash
 npm pack happy@<version> && tar xzf happy-<version>.tgz
@@ -268,17 +285,11 @@ npm pack happy@<version> && tar xzf happy-<version>.tgz
 grep -rhoE "/v[0-9]+/[a-zA-Z0-9/_.:-]+" package/dist | sort -u
 # routes built from template strings — easy to miss
 grep -rhoaE "/v1/sessions/\$\{[^}]+\}/[a-z/-]+" package/dist | sort -u
-# what this server answers
-grep -rhoE "app\.(get|post|put|patch|delete)\('[^']+'" sources/app/api/routes | sort -u
+# what the pinned server answers
+grep -rhoE "app\.(get|post|put|patch|delete)\('[^']+'" /root/happy-upstream/packages/happy-server/sources/app/api/routes | sort -u
 ```
 
-Also watch the relay's own 404 log for paths that look like real client calls rather than internet scanners:
-
-```bash
-docker compose logs happy-server | grep "404 - Method" | grep "/v[0-9]"
-```
-
-Upstream now lives in the [`slopus/happy`](https://github.com/slopus/happy) monorepo under `packages/happy-server/` — the standalone `slopus/happy-server` repo was archived when it was merged there, so a `git fetch` against it returning nothing means nothing.
+The upstream server does **not** log requests in production, so 404s won't show up in `docker compose logs`. Watch your reverse proxy's access log for 404s on `/v[0-9]` paths instead.
 
 ## License
 
