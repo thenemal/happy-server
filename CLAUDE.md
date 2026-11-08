@@ -296,6 +296,7 @@ A claude.ai cloud routine, **`happy-server upstream watch`** (`trig_017YePh7geaU
 - pin `41cdc0a`; last server commit `acc653b` (2026-11-06)
 - 39 migrations deployed, newest `20260914090000_add_session_avatars`; any newer migration is flagged with an additive/destructive verdict
 - npm `happy` 1.2.6, `happy-server-self-host` 1.1.11
+- web portal frozen at `WEB_SHA` `c33cc63c` (added Sunday, 2026-11-08). The routine flags a new upstream web client, or a server change that could break the portal: routes, the socket.io path or transport, the QR login routes, the `/` banner. Its baseline lists the 10 packages under `packages/`, none of them a web client.
 - known and ignored: attachments (phase 2) and open upstream PR #1837
 
 First run on the new prompt: Tuesday, 2026-12-01. **When the baseline moves** (CLI upgrade, an `UPSTREAM_SHA` bump), update the prompt's baseline section too, or it will keep reporting already-known items.
