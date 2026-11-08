@@ -33,6 +33,19 @@ services:
     command: sh -c "pnpm exec prisma migrate deploy && pnpm run start"
     restart: unless-stopped
 
+  portal:
+    # Same-origin gateway for home8 (#3): the self-hosted web app plus a reverse
+    # proxy to happy-server. Built by ./build-portal.sh from the commit in WEB_SHA;
+    # keep this tag in sync with that file. The external Caddy targets :3006.
+    # Start/recreate it scoped (`docker compose up -d --no-deps portal`) so happy-server is
+    # never recreated as a side effect.
+    image: happy-portal:web-c33cc63
+    ports:
+      - "3006:80"
+    depends_on:
+      - happy-server
+    restart: unless-stopped
+
   postgres:
     image: postgres:16-alpine
     environment:

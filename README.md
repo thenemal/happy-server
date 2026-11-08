@@ -32,7 +32,9 @@ Settings → **Relay Server URL** → set to `https://home8.compagnie-lily.org`
 
 ### Happy web app
 
-Go to `https://app.happy.engineering/server`, set the relay URL to `https://home8.compagnie-lily.org` (no trailing slash), then authenticate.
+Open **`https://home8.compagnie-lily.org`** in a browser — this instance serves its own copy of the web app, already pointed at this relay (same origin, so it also works behind restrictive corporate proxies).
+
+Or go to `https://app.happy.engineering/server`, set the relay URL to `https://home8.compagnie-lily.org` (no trailing slash), then authenticate.
 
 > A trailing slash causes double-slash URLs (`//v1/...`) that return 404 on every API call.
 

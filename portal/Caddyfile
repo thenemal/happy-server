@@ -1,0 +1,48 @@
+# Gateway for home8.compagnie-lily.org (#3): serves the self-hosted Happy web
+# app ("portal") and reverse-proxies the relay API, all on one origin so the
+# browser never makes a cross-site request.
+#
+# The external Caddy (other host) points home8 at this container (host :3006).
+# happy-server stays reachable directly on :3005.
+{
+	admin off
+	auto_https off
+	servers {
+		# The external Caddy is the client; keep the real client IP it forwards.
+		trusted_proxies static private_ranges
+	}
+}
+
+:80 {
+	# Relay API by prefix. socket.io lives at /v1/updates, so websockets go here too.
+	@api path /v1 /v1/* /v2 /v2/* /v3 /v3/* /files/* /health /logs-combined-from-cli-and-mobile-for-simple-ai-debugging
+	handle @api {
+		reverse_proxy happy-server:3005 {
+			flush_interval -1
+		}
+	}
+
+	# "/" is shared. Server validation (app /server page, phone relay-URL check)
+	# fetches it with Accept: text/plain and requires "Welcome to Happy Server!";
+	# the systemd readiness probe (curl, */*) needs a 2xx. Only a browser
+	# navigation (Accept contains text/html) gets the portal.
+	@root_api {
+		path /
+		not header Accept *text/html*
+	}
+	handle @root_api {
+		reverse_proxy happy-server:3005
+	}
+
+	# Everything else: the static Expo export, with SPA fallback.
+	handle {
+		root * /srv
+		@hashed path /_expo/*
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+		@unhashed not path /_expo/*
+		header @unhashed Cache-Control "no-cache"
+		encode gzip
+		try_files {path} {path}.html /index.html
+		file_server
+	}
+}
