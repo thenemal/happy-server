@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is happy-server?
 
-This repo is the **relay backend** for the [Happy](https://github.com/slopus/happy) ecosystem — an open-source tool that lets you control Claude Code remotely from mobile/web. It is the self-hosted equivalent of `https://api.cluster-fluster.com`.
+This repo is the **deployment config** for Seb's self-hosted **relay backend** of the [Happy](https://github.com/slopus/happy) ecosystem — an open-source tool that lets you control Claude Code remotely from mobile/web. It is the self-hosted equivalent of `https://api.cluster-fluster.com`.
 
 ### Ecosystem overview
 
@@ -235,50 +235,51 @@ systemctl list-timers 'happy-*'
   - **The old musl-symlink workaround is obsolete** — as of CLI 1.1.10 / agent-sdk 0.3.193 there is **no** `claude-agent-sdk-linux-x64-musl` package; the SDK ships a working glibc binary at `…/claude-agent-sdk-linux-x64/claude` (it even prefers the native-installer claude). Do **not** re-create that symlink; the real fix is `IS_SANDBOX=1`.
 - **Two happy installs / npm-prefix trap** — on this box `which happy` → `/usr/local/bin/happy` → `/usr/local/lib/node_modules/happy`, but `npm prefix -g` is `/usr` (so `npm i -g happy` writes to `/usr/lib/node_modules/happy`, an **off-PATH** copy that has no effect). Always upgrade the active copy with `npm i -g --prefix /usr/local happy`, then verify `happy --version`. The stray `/usr/lib` copy can be removed with `npm rm -g --prefix /usr happy`.
 
-### Known API version gaps (fixed)
+### The server is upstream, pinned (#7)
 
-The happy-server codebase can lag behind the CLI/app client versions. Symptoms: `404` on endpoints the clients call. Fixed so far:
+**This repo no longer contains server source.** The relay runs **upstream** `slopus/happy` `packages/happy-server`, built locally from the commit in `UPSTREAM_SHA` by `./build-upstream.sh` into `happy-server:upstream-<short>`. Until 2026-11 this repo was a fork of the standalone `slopus/happy-server`. That repo was archived on 2026-02-14 because it **merged into the monorepo**, not because the project died. The fork's last state is tagged **`fork-final`**, which is how the rollback image gets rebuilt.
 
-| Endpoint | Added | Why needed |
-|---|---|---|
-| `GET /v3/sessions/:id/messages?after_seq&limit` | 2026-05-09 | CLI v1.1.8+ uses HTTP polling instead of WebSocket for message fetch |
-| `POST /v3/sessions/:id/messages` | 2026-05-09 | CLI v1.1.8+ uses HTTP batch insert instead of WebSocket `message` event |
-| `DELETE /v1/machines/:id` | 2026-05-12 | App sends delete when user removes an old machine |
-| `POST /v1/sessions/:id/push-event` | 2026-09-13 (#9, PR #10) | CLI 1.2.0+ sends session pushes (done/permission/question) through the server. Missing, it 404'd 28× and **no session push ever reached the phone** — the CLI only logs the failure at debug level |
-| `POST /v1/sessions/:id/archive` | 2026-09-13 (#9, PR #11) | CLI calls it when the session process gets **SIGTERM** (app/daemon stop). An interactive double Ctrl-C does *not* call it — that path uses the socket `session-end` event |
-| `GET /v3/sessions/:id/messages?before_seq` | 2026-11-08 (#15) | Clients open a session with `before_seq=2147483647` (newest page, DESC; upstream `5a914a2`, May 2026). Our route only knew `after_seq`, so zod dropped the param and it served the **oldest** 100 with a 200 — sessions over 100 messages opened with stale history and no error anywhere. `after_seq` and `before_seq` are mutually exclusive (400) |
+**Why the fork was dropped.** Every patch it carried turned out to be a hand-port of something upstream already had:
+- v3 messages, including `before_seq` (#15)
+- `DELETE /v1/machines/:id`
+- `push-event` and the push-suppression presence check (#9)
+- `archive` and `clearSessionUpdates` (#9)
 
-All ported from upstream `slopus/happy` `packages/happy-server`; no DB migration. **Tests run inside the Docker builder stage** (this box has no local `node_modules`/yarn): `docker build --target builder -t happy-server-builder:test . && docker run --rm happy-server-builder:test npx vitest run`. `processImage.spec.ts` always fails there — its `__testdata__/image.jpg` was never committed. Verified 2026-09-13: backgrounded app → push sent; foregrounded → suppressed; Ctrl-C and SIGTERM sessions both go `active=false` and stay there past the 60s suppression window.
+Parity was checked route by route on Sunday, 2026-11-08 against `41cdc0a`. The fork's only extra route was `POST /v1/voice/token`, which no client calls. Evidence is in the #7 plan comment.
 
-**Still missing — attachments** (`POST /v1/sessions/:id/attachments/request-upload` / `request-download`, upstream `attachmentRoutes.ts`): image attachments would fail. Deferred, not trivial: presigned URLs would be signed for the internal `minio:9000` host, unreachable from the CLI, so it needs a second public-endpoint S3 client plus a Caddy host-header check.
+**Bumping the pin:**
+1. Pick a commit, preferably the latest one touching `packages/happy-server`:
+   ```bash
+   gh api "repos/slopus/happy/commits?path=packages/happy-server&per_page=10" \
+     --jq '.[] | "\(.sha[:7]) \(.commit.author.date[:10]) \(.commit.message | split("\n")[0])"'
+   ```
+2. Check for new migrations. This is the step that matters: list `packages/happy-server/prisma/migrations` at the new SHA against the DB:
+   ```bash
+   docker compose exec -T postgres psql -U happy -d happy -Atc 'select migration_name from _prisma_migrations order by 1'
+   ```
+   New ones mean a **human** step: `pg_dump` first, and read every `migration.sql` for anything destructive.
+3. Update `UPSTREAM_SHA`, run `./build-upstream.sh`, and update the `image:` tag in `docker-compose.yml`.
+4. `docker compose up -d happy-server`. Its command runs `prisma migrate deploy` first, so **the first start of a new image is the migration step.**
+5. `systemctl restart happy`, then verify: `happy daemon status`, plus a mobile session open and a push.
 
-**Push suppression:** a push is suppressed only when a `user-scoped` socket has reported `app-state: active` (`eventRouter.hasActiveUiClient`, fed by `socket.data.appState` in `socket.ts`). Session- and machine-scoped sockets never count, a client that never reported state counts as absent, and a throwing presence check sends anyway — a missed push costs more than a redundant one. Upstream checks presence with socket.io `fetchSockets()` across replicas; this fork reads its single-process in-memory connection map instead, so porting upstream's `eventRouter` refactor later means revisiting that method.
+**Local patches**, only if upstream truly lacks a fix: put `*.patch` files in `patches/`. `build-upstream.sh` applies them on top of the pin. Keep the directory empty otherwise, because every patch is a re-port waiting to happen.
 
-#### ⚠️ Upstream MOVED to a monorepo — our fork is ~6 months and 97 commits behind
+**Image facts at `41cdc0a`:**
+- `Dockerfile.server` needs the whole workspace (root `pnpm-lock.yaml`, `patches/`, `scripts/`, `happy-cli`/`happy-wire` package files), so the script clones the full monorepo to `/root/happy-upstream`.
+- Runtime is `node:24` + pnpm 10.11, workdir `/repo/packages/happy-server`.
+- `prisma` lives at `/repo/node_modules/.bin`, so use `pnpm exec prisma ...`, not `node_modules/.bin/prisma`.
+- It listens on `PORT` (default 3005); the `EXPOSE 3000` is cosmetic.
+- Image size is **~5.9 GB**.
 
-**`slopus/happy-server` was archived on 2026-02-14 because it was merged into [`slopus/happy`](https://github.com/slopus/happy), not because it was abandoned.** Its README says so plainly:
+**Tests** live upstream (`*.spec.ts` / `*.test.ts` next to the sources). Run them from the builder stage of `/root/happy-upstream`, not here.
 
-> *"This repository has been merged to the main one. All issues and code is now living there."*
-
-`slopus/happy-cli` was archived the same day for the same reason. The live server source is now **`packages/happy-server/`** inside the monorepo, and it is very much maintained: **97 commits since our 2026-02-13 fork point**, most recent 2026-08-10.
-
-**Do not read `isArchived: true` on the old repo as "project dead."** Checking the archive flag without reading the README produces exactly the wrong conclusion — that mistake was made and committed on 2026-08-18 (see a96e6e0, corrected here). `git fetch upstream` returning 0 commits is *expected* and means nothing: the `upstream` remote points at the frozen standalone repo, not the monorepo.
-
-**Our local patches are no longer local.** The monorepo has a dedicated `sources/app/api/routes/v3SessionRoutes.ts` **plus `v3SessionRoutes.test.ts`** — the v3 message endpoints we hand-patched now exist upstream as a proper tested module. **`DELETE /v1/machines/:id` is upstream too** (`machinesRoutes.ts`, confirmed 2026-09-13), so **both** entries in the table above are superseded — the fork carries nothing upstream lacks. It also has `attachmentRoutes.ts`, `machinesRoutes.spec.ts` and `pushRoutes.spec.ts`, none of which we have. So the "re-check after a pull, they may have been added upstream (great, remove the patch)" advice is **live again** — that is precisely what happened.
-
-To diff against real upstream, add the monorepo as a remote and compare against `packages/happy-server/`:
-
-```bash
-gh api repos/slopus/happy/contents/packages/happy-server/sources/app/api/routes --jq '.[].name'
-gh api "repos/slopus/happy/commits?path=packages/happy-server&per_page=20" \
-  --jq '.[] | "\(.commit.author.date[:10])  \(.commit.message | split("\n")[0])"'
-```
+**Still missing: attachments.** In S3 mode upstream returns presigned URLs signed for `S3_HOST`, and `S3_HOST=minio` is unreachable from clients. So image attachments still fail, same as before the switch. The fix is upstream's `0f74546` pattern: point `S3_HOST` at a public MinIO hostname through Caddy, preserving the Host header. That is phase 2, a separate issue.
 
 #### Scheduled upstream watch (cloud routine)
 
-A claude.ai cloud routine, **`happy-server upstream watch`** (`trig_017YePh7geaUJiqC8jQVPYpS`), runs on the 1st of each month at 08:00 UTC (`0 8 1 * *`) — it is **not** a local cron or systemd timer, so `crontab -l` / `systemctl list-timers` won't show it. List/inspect it via the `RemoteTrigger` tool (or claude.ai/code/routines). It checks out this fork read-only and emails Seb **only** when something is new: `packages/happy-server` commits in `slopus/happy` over the last 35 days, relevant PRs, new `happy` / `happy-server-self-host` npm versions, or API/protocol/migration changes. Quiet months send nothing.
+A claude.ai cloud routine, **`happy-server upstream watch`** (`trig_017YePh7geaUJiqC8jQVPYpS`), runs on the 1st of each month at 08:00 UTC (`0 8 1 * *`) — it is **not** a local cron or systemd timer, so `crontab -l` / `systemctl list-timers` won't show it. List/inspect it via the `RemoteTrigger` tool (or claude.ai/code/routines). It checks out this repo read-only and emails Seb **only** when something is new: `packages/happy-server` commits in `slopus/happy` over the last 35 days, relevant PRs, new `happy` / `happy-server-self-host` npm versions, or API/protocol/migration changes. Quiet months send nothing.
 
-⚠️ **Until 2026-09-13 it watched the archived `slopus/happy-server`**, so it was structurally incapable of alerting — every "silent" month before that date means nothing. Rewritten that day to target the monorepo, with a baseline embedded in the prompt. **Baseline moved 2026-10-04** to upstream server commit `8ce230c` (2026-09-20); npm `happy` 1.2.5, `happy-server-self-host` 1.1.11; known-and-ignored gaps now include the session-avatar routes/columns and `projectRoutes.ts`, plus open upstream PR #1837. **When the baseline moves** (CLI upgrade, migration off this fork), update the prompt's baseline section too, or it will keep reporting already-known items.
+⚠️ **Until 2026-09-13 it watched the archived `slopus/happy-server`**, so it was structurally incapable of alerting — every "silent" month before that date means nothing. Rewritten that day to target the monorepo, with a baseline embedded in the prompt. **Baseline moved 2026-10-04** to upstream server commit `8ce230c` (2026-09-20); npm `happy` 1.2.5, `happy-server-self-host` 1.1.11; known-and-ignored gaps now include the session-avatar routes/columns and `projectRoutes.ts`, plus open upstream PR #1837. **When the baseline moves** (CLI upgrade, an `UPSTREAM_SHA` bump), update the prompt's baseline section too, or it will keep reporting already-known items.
 
 ⚠️ **The cloud sandbox cannot use the GitHub API for repos not attached to the routine.** Only `thenemal/happy-server` is attached, so `api.github.com/repos/slopus/happy/...` returns 403 from both `curl` and WebFetch, and the GitHub MCP tools refuse it ("not configured for this session"). What *does* work (verified in the 2026-09-13 test run): **WebFetch on plain `github.com` HTML pages** (`/slopus/happy/commits/main/packages/happy-server`, `/tree/...`, `/pulls?q=...`) and on **`registry.npmjs.org/<pkg>/latest`** (the full package document gets truncated — use `/latest`). The prompt spells these URLs out; don't "simplify" it back to `curl api.github.com`, or the routine will fail and — worse — may read the failure as "nothing new". The prompt also makes a failed fetch an email-worthy event for that reason.
 
@@ -293,10 +294,10 @@ happy server
 
 `happy server` discovers the package and runs the sync server **plus the bundled web app** on embedded **PGlite** storage with local-filesystem uploads — **no Postgres, no Redis, no S3** — and writes `settings.serverUrl` so the CLI and daemon target it. That replaces this repo's four-container stack (`happy-server` + `postgres` + `redis` + `minio`) and would also retire the separate self-hosted-web-app work in issue #3, since the web app ships with it.
 
-Caveat before switching: `happy-server-self-host` was still **1.1.11** as of 2026-10-01 while the CLI is already **1.2.5**, so it *lags the client badly* — the same class of gap this fork keeps hitting. Migration also means moving existing Postgres/MinIO data into PGlite/local files — not a drop-in for a running instance with history. Relevant docs in the monorepo: `docs/deployment.md`, `docs/backend-architecture.md`, `docs/api.md`, `docs/protocol.md`, `docs/plans/happy-serve-self-host.md`.
+Caveat before switching: `happy-server-self-host` was still **1.1.11** as of 2026-10-01 while the CLI is already **1.2.5**, so it *lags the client badly* — the same class of gap the old fork kept hitting. Migration also means moving existing Postgres/MinIO data into PGlite/local files — not a drop-in for a running instance with history. Relevant docs in the monorepo: `docs/deployment.md`, `docs/backend-architecture.md`, `docs/api.md`, `docs/protocol.md`, `docs/plans/happy-serve-self-host.md`.
 
 Two gotchas when checking upstream from this repo:
-- **`gh` targets the wrong repo by default here, and the `upstream` remote is stale.** With both `origin` (`thenemal/happy-server`) and `upstream` (`slopus/happy-server`) remotes, `gh` prefers `upstream` — so a bare `gh issue create` silently tries the *archived* repo and fails with "Repository was archived so is read-only". Pinned via `git config remote.origin.gh-resolved base`; verify with `gh repo view --json nameWithOwner`. Note the `upstream` remote itself now points at a dead repo — real upstream is `slopus/happy` `packages/happy-server/`.
+- **`gh` targets the wrong repo by default here, and the `upstream` remote is stale.** With both `origin` (`thenemal/happy-server`) and `upstream` (`slopus/happy-server`) remotes, `gh` prefers `upstream`. Drop the stale remote with `git remote remove upstream` once on the upstream image; it serves no purpose now — so a bare `gh issue create` silently tries the *archived* repo and fails with "Repository was archived so is read-only". Pinned via `git config remote.origin.gh-resolved base`; verify with `gh repo view --json nameWithOwner`. Note the `upstream` remote itself now points at a dead repo — real upstream is `slopus/happy` `packages/happy-server/`.
 - **`happy --version` is misleading** — it passes through to Claude Code and prints *that* version. For the real CLI version use `node -p "require('/usr/local/lib/node_modules/happy/package.json').version"`, or read `startedWithCliVersion` from `happy daemon status`.
 
 **Client compatibility:** verified 2026-08-18 against happy CLI **1.2.0** (upgraded from 1.1.10 that day). Before upgrading, the API surface of both tarballs was diffed rather than assumed: **9 base endpoints and 7 constructed sub-routes, identical in both** — including the patched `v3/sessions/:id/messages` — and the same `@anthropic-ai/claude-agent-sdk` constraint (`^0.3.179`). Post-upgrade the daemon registers, holds its WebSocket, and the relay answers 200. The v3 patch is still needed and still works.
@@ -305,135 +306,77 @@ Two gotchas when checking upstream from this repo:
 
 **Upgraded to 1.2.6 on 2026-11-08 (#14)** ✅ verified by user 2026-11-08 (restored a session from mobile; daemon resumed it, message answered, push delivered). Pre-check: tarball endpoint diff vs 1.2.3 **identical** (literal + constructed session sub-routes); the bundle contains **no** `session-subscribe` socket event (upstream `5a04b13`, machine-socket session subscription) and **no** avatar calls, so no server change or migration was needed. agent-sdk constraint `^0.3.259` → `^0.3.295` (installs 0.3.319). Same sequence as 1.2.3; no live sessions at the time. Post-upgrade: `startedWithCliVersion 1.2.6`, cgroup `/system.slice/happy.service`, both `ExecStartPre` `status=0`, machine registered + WebSocket connected, relay 200, `happy-health.timer` re-enabled and passing. **Rollback:** `npm i -g --prefix /usr/local /root/.happy/rollback/happy-1.2.3.tgz && systemctl restart happy`.
 
-**Upstream state as of the 2026-10-01 watch run** (the routine's first successful run after the rewrite — it emailed, proving the new URLs work): **5 new server commits** since the `de4f215` baseline, `eb48289`/`37e9479` (2026-09-16) through `8ce230c` (2026-09-20). What matters here:
+**Upstream schema at the `41cdc0a` pin** adds 3 migrations on top of the fork's 36. The fork's 36 are byte-identical and checksum-identical to upstream's. All 3 are additive:
+- `20260407053500_add_voice_conversation`: new table
+- `20260611120000_add_projects`: new table + nullable `Session.projectId`
+- `20260914090000_add_session_avatars`: nullable columns + a default
 
-- **npm `happy` was at 1.2.5 then (box now runs 1.2.6, which still makes no avatar calls — see above).** Do not upgrade blind: upstream added **encrypted session avatars**, which need three nullable `Session` columns (`avatarRef`, `avatarPreview`, `avatarVersion`, upstream PR #1790 — a migration, i.e. a **human** step) plus `sessionAvatarRoutes.ts` (PR #1788). Without them a 1.2.5 client's avatar calls 404 against this fork.
-- **No avatar/project endpoints appear in our 404 log**, so current clients are not asking for them yet — the upgrade is optional, not urgent (checked 2026-10-04 over 7 days; every 404 in that window was an internet scanner probing `/.env`, `/.git/config` and friends).
-- **Upstream security PR #1837** (open) fixes unauthenticated `GET /files/*` access for **local-storage** deployments. This instance serves uploads from MinIO and has no `/files/*` route, so it is not affected.
+They apply at cutover, which is a human step. **Upstream security PR #1837** (still open) concerns the local-storage `/files/*` route. It only applies if `S3_HOST` is unset, which is why `S3_HOST` is mandatory (see Environment Variables).
 
-⚠️ **The CLI-vs-CLI diff never checks the CLI against *our server*.** It proved 1.2.0 → 1.2.3 changed nothing, but both versions call session sub-routes this fork has never had — see *Known API version gaps* above (push-event, archive, attachments). When diffing, also compare the constructed routes against `grep -rhoE "app\.(get|post|put|patch|delete)\('[^']+'" sources/app/api/routes`. The simple `/v[0-9]+/...` grep only shows the literal prefix of template-built routes; find them with `grep -rhoaE "/v1/sessions/\\$\{[^}]+\}/[a-z/-]+" dist`.
+⚠️ **The CLI-vs-CLI diff never checks the CLI against *our server*.** It proved 1.2.0 → 1.2.3 changed nothing, but both versions called session sub-routes the old fork lacked (push-event, archive, attachments). When diffing, also compare the constructed routes against the server at the pin: `grep -rhoE "app\.(get|post|put|patch|delete)\('[^']+'" /root/happy-upstream/packages/happy-server/sources/app/api/routes`. The simple `/v[0-9]+/...` grep only shows the literal prefix of template-built routes; find them with `grep -rhoaE "/v1/sessions/\\$\{[^}]+\}/[a-z/-]+" dist`.
 
 Note 1.2.0 was published to **npm only** — GitHub releases stop at `cli-1.1.10`, so there are no changelog notes for it. Diffing the tarball is the only reliable pre-upgrade check. To repeat it: `npm pack happy@<ver>`, unpack, then `grep -rhoE "/v[0-9]+/[a-zA-Z0-9/_.:-]+" dist | sort -u` against the installed copy's `dist`.
 
-## Commands
-
-- `yarn build` — TypeScript type-check (no emit; `tsc --noEmit`)
-- `yarn start` — start server via `tsx ./sources/main.ts`
-- `yarn test` — run Vitest tests
-- `yarn generate` — regenerate Prisma client after schema changes
-
-Local dev dependencies (Docker shortcuts):
-- `yarn db` — start local Postgres container
-- `yarn redis` — start local Redis container
-- `yarn s3` / `yarn s3:init` — start local MinIO and init the `happy` bucket
-
-**Never run migrations yourself** — only `yarn generate` when new types are needed. Migrations are a human responsibility.
-
 ## Self-Hosted Deployment (this instance)
 
-Managed via Docker Compose at `/root/happy-server/docker-compose.yml`. Services: `happy-server` (port 3005), `postgres`, `redis`, `minio` (port 9000 API / 9001 console), `minio-init` (one-shot bucket init).
+Managed via Docker Compose at `/root/happy-server/docker-compose.yml`. Services:
+- `happy-server`: the upstream image, port 3005
+- `postgres`
+- `redis`: also the socket.io streams adapter
+- `minio`: port 9000 API / 9001 console
+- `minio-init`: one-shot bucket init
+
+Secrets live in `/root/happy-server/.env` (gitignored). **Always run compose from `/root/happy-server`.** The project name `happy-server` prefixes the volumes (`happy-server_postgres_data`, ...); running it from another directory, a worktree included, would create a fresh empty stack.
 
 ```bash
-docker compose up -d          # start / apply compose changes
+./build-upstream.sh           # (re)build the pinned image
+docker compose up -d          # start / apply compose changes (runs migrate deploy first!)
 docker compose logs -f happy-server
 docker compose down
 ```
 
-On startup the container runs `prisma migrate deploy` before `yarn start`. Secrets live in `/root/happy-server/.env` (gitignored).
+**Never run migrations yourself.** Migrations are a human responsibility. Because `migrate deploy` is in the start command, a new image with new migrations counts as one. Back up first:
 
-## Architecture
-
-### Entry point
-
-`sources/main.ts` wires storage → modules → API in order:
-1. Connect Postgres (`db.$connect`) and ping Redis
-2. `initEncrypt()` — derives key tree from `HANDY_MASTER_SECRET` via `privacy-kit`
-3. `initGithub()` — optional; skips if GitHub env vars absent
-4. `loadFiles()` — verifies S3/MinIO bucket exists (hard failure if missing)
-5. `auth.init()` — starts auth token lifecycle
-6. `startApi()`, `startMetricsServer()`, `startTimeout()`
-
-### Source layout
-
-```
-sources/
-├── main.ts
-├── app/              # Application-specific logic
-│   ├── api/          # Fastify server, routes/, socket/
-│   ├── auth/
-│   ├── events/
-│   ├── feed/
-│   ├── github/
-│   ├── kv/
-│   ├── monitoring/
-│   ├── presence/     # Session activity cache + timeout
-│   ├── session/
-│   └── social/
-├── modules/          # Reusable, non-app-specific
-│   ├── encrypt.ts    # Symmetric encryption via privacy-kit KeyTree
-│   └── github.ts
-├── storage/
-│   ├── db.ts         # Prisma client singleton
-│   ├── files.ts      # MinIO/S3 client
-│   ├── inTx.ts       # Transaction wrapper (see below)
-│   ├── redis.ts
-│   ├── repeatKey.ts
-│   ├── seq.ts
-│   └── simpleCache.ts
-└── utils/
+```bash
+mkdir -p /root/happy-backups
+docker compose exec -T postgres pg_dump -U happy -Fc happy > /root/happy-backups/happy-$(date +%F).dump
 ```
 
-### Key patterns
+**Rollback to the fork**, which tolerates the additive upstream schema:
+1. Rebuild the fork image from the `fork-final` tag (its `Dockerfile` builds the old server), or use a saved `happy-server:fork-<sha>` tag.
+2. Set `image: happy-server:fork-<sha>` in compose. The fork's own `node_modules/.bin/prisma migrate deploy && yarn start` command is safe here. The rehearsal on Sunday, 2026-11-08 showed fork prisma 6.11 reports "No pending migrations" against a DB that has the 3 extra upstream migrations, and the fork then served sessions and v3 messages normally.
 
-**Transactions — `inTx` / `afterTx`**: All DB writes use `inTx`, which runs at `Serializable` isolation with automatic retry (up to 3×, backoff 100/200/300 ms) on Prisma P2034 conflicts. Use `afterTx(tx, callback)` to schedule side-effects (event emissions, notifications) that only fire after the transaction commits — never emit events directly inside a transaction.
-
-**Session deactivation — `activityCache.clearSessionUpdates` / `resumeSessionUpdates`**: `session-alive` heartbeats are batched in `presence/sessionCache.ts` and flushed every 5s as `active: true`. Any path that sets a session `active: false` or deletes it (socket `session-end`, `POST /v1/sessions/:id/archive`, `DELETE /v1/sessions/:id`) must call `clearSessionUpdates(id)` **before** its DB write, or an in-flight heartbeat re-activates the session. That suppresses heartbeats for 60s; `POST /v1/sessions` calls `resumeSessionUpdates(id)` so a session restarting with the same tag is not stuck inactive. A new start/reuse path needs the resume call too.
-
-**Encryption**: `encryptString` / `decryptString` / `encryptBytes` / `decryptBytes` from `@/modules/encrypt` — always use these, never roll your own crypto. Use `privacyKit.encodeBase64` / `decodeBase64` (from `privacy-kit`) instead of `Buffer`.
-
-**Action files**: DB-mutating operations live in dedicated files named `<entity><Action>.ts` (e.g., `friendAdd.ts`) inside the relevant `sources/app/<domain>/` folder. Add a doc comment explaining the logic. Don't return values "just in case" — only return what callers need.
-
-**API routes**: Fastify 5 + Zod for type-safe request/response. All routes under `sources/app/api/routes/`. All operations must be idempotent — clients retry automatically.
-
-**Imports**: Always use `@/` absolute imports (e.g., `import { db } from "@/storage/db"`).
-
-## Code Style
-
-- 4-space indentation
-- TypeScript strict mode; prefer `interface` over `type`; avoid enums (use maps)
-- Functional style; avoid classes
-- Test files: `*.spec.ts` alongside the source file
-- No logging unless asked; no transactional wrappers around non-transactional work (e.g., file uploads)
+Full DB restore (this **loses post-cutover data**): stop `happy-server`, `dropdb`/`createdb`, `pg_restore --no-owner` the dump. Detailed steps are in the #7 plan comment.
 
 ## Environment Variables
+
+Set in `docker-compose.yml` from `.env`:
 
 | Variable | Purpose |
 |---|---|
 | `DATABASE_URL` | Prisma Postgres connection string |
-| `REDIS_URL` | Redis connection string |
-| `HANDY_MASTER_SECRET` | Master secret for all encryption key derivation |
-| `PORT` | Listening port (3005) |
-| `S3_HOST`, `S3_PORT`, `S3_USE_SSL` | MinIO/S3 endpoint |
-| `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_PUBLIC_URL` | MinIO/S3 credentials and public base URL |
-| `GITHUB_*` | Optional GitHub OAuth/App integration |
-| `DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING` | Enables remote log collection to `.logs/` |
+| `REDIS_URL` | Redis. Also enables the socket.io Redis streams adapter that the push-presence check (`fetchSockets()`) uses |
+| `HANDY_MASTER_SECRET` | Seeds the encryption KeyTree **and** the auth token generator. **Never change it.** Every client token and every server-encrypted field depends on it |
+| `PORT` | 3005 |
+| `S3_HOST`, `S3_PORT`, `S3_USE_SSL`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_BUCKET`, `S3_PUBLIC_URL` | MinIO. **`S3_HOST` is mandatory.** Without it, upstream silently switches to local-disk storage under `DATA_DIR` and serves `/files/*` (upstream PR #1837) |
+| `PUBLIC_URL` | Base URL for attachment and avatar URLs (`https://home8.compagnie-lily.org`) |
+
+Deliberately unset:
+- `DB_PROVIDER` / `PGLITE_DIR` / `DATA_DIR` / `HAPPY_STATIC_DIR`: standalone mode only
+- `ELEVENLABS_API_KEY`: voice stays off
+- `GITHUB_*`
+- `S3_REGION`: defaults to `us-east-1`
+- `METRICS_*`: Prometheus on `:9090` inside the container; harmless
 
 ## Debugging
 
-Log files land in `.logs/` named `MM-DD-HH-MM-SS.log`. Always check `date` first — logs use local time.
+**404s no longer show up in `docker compose logs`.** Upstream `eb980a5c` ("minimize production logs") sets `disableRequestLogging` and log level `error` when `NODE_ENV=production`. The only trace is an aggregate `2xx=/4xx=/5xx=` count in a periodic summary line, with no paths. That breaks the old client-drift check, which relied on seeing a 404 for a route the clients call. To see request paths:
+- the **Caddy access log** for home8 (Caddy runs on another host), recommended as the standing replacement
+- temporarily set `DANGEROUSLY_LOG_TO_SERVER_FOR_AI_AUTO_DEBUGGING=1`, which writes debug-level logs to `.logs/` inside the container, then `docker compose up -d happy-server`
 
 ```bash
-# Errors
-tail -100 .logs/*.log | grep -E "(error|Error|ERROR|failed)"
-
-# Auth flow
-tail -300 .logs/*.log | grep -E "(Token verified|User connected|User disconnected)"
-
-# Session creation
-tail -500 .logs/*.log | grep -E "(new-session|Session created)"
-
-# Endpoint traffic
-tail -100 .logs/*.log | grep "incoming request"
+docker compose logs --since 1h happy-server                      # errors + periodic summary
+docker compose exec happy-server sh -c 'tail -200 .logs/*.log'   # only with the debug env var set
 ```
 
 **Common tells:**

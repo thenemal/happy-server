@@ -1,6 +1,8 @@
 services:
   happy-server:
-    build: .
+    # Upstream slopus/happy packages/happy-server, built by ./build-upstream.sh
+    # from the commit in UPSTREAM_SHA. Keep this tag in sync with that file.
+    image: happy-server:upstream-41cdc0a
     ports:
       - "3005:3005"
     environment:
@@ -9,6 +11,8 @@ services:
       DATABASE_URL: postgresql://happy:${POSTGRES_PASSWORD}@postgres:5432/happy
       REDIS_URL: redis://redis:6379
       HANDY_MASTER_SECRET: ${HANDY_MASTER_SECRET}
+      # S3_HOST is mandatory: if unset, upstream silently falls back to
+      # local-disk storage and serves /files/* (see upstream PR #1837).
       S3_HOST: minio
       S3_PORT: "9000"
       S3_USE_SSL: "false"
@@ -16,6 +20,7 @@ services:
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       S3_BUCKET: happy
       S3_PUBLIC_URL: https://files.home8.compagnie-lily.org/happy
+      PUBLIC_URL: https://home8.compagnie-lily.org
     depends_on:
       postgres:
         condition: service_healthy
@@ -23,7 +28,9 @@ services:
         condition: service_healthy
       minio-init:
         condition: service_completed_successfully
-    command: sh -c "node_modules/.bin/prisma migrate deploy && yarn start"
+    # migrate deploy runs on every start: the first start of a new image IS the
+    # migration step (a human step — take a pg_dump first, see CLAUDE.md).
+    command: sh -c "pnpm exec prisma migrate deploy && pnpm run start"
     restart: unless-stopped
 
   postgres:
