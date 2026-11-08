@@ -362,29 +362,44 @@ export function sessionRoutes(app: Fastify) {
         });
     });
 
-    // V3 Messages API - GET with after_seq pagination
+    // V3 Messages API - GET, paginated in either direction (ported from
+    // upstream v3SessionRoutes.ts, slopus/happy 5a914a2):
+    //   - after_seq=N  → forward sync: seq > N, ASC. Used to pull anything
+    //                    newer than the highest seq the client has seen.
+    //   - before_seq=N → backward paging: seq < N, DESC. Clients open a session
+    //                    with before_seq=2147483647 (newest page) and lazy-load
+    //                    older history on scroll-up.
+    // Mutually exclusive. With neither, defaults to after_seq=0 (the daemon's
+    // legacy forward sync).
     app.get('/v3/sessions/:sessionId/messages', {
         schema: {
             params: z.object({ sessionId: z.string() }),
             querystring: z.object({
-                after_seq: z.coerce.number().int().min(0).default(0),
+                after_seq: z.coerce.number().int().min(0).optional(),
+                before_seq: z.coerce.number().int().min(1).optional(),
                 limit: z.coerce.number().int().min(1).max(500).default(100)
-            })
+            }).refine(
+                (q) => !(q.after_seq !== undefined && q.before_seq !== undefined),
+                { message: 'after_seq and before_seq are mutually exclusive' }
+            )
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
         const userId = request.userId;
         const { sessionId } = request.params;
-        const { after_seq, limit } = request.query;
+        const { after_seq, before_seq, limit } = request.query;
 
         const session = await db.session.findFirst({ where: { id: sessionId, accountId: userId } });
         if (!session) {
             return reply.code(404).send({ error: 'Session not found' });
         }
 
+        const isBackward = before_seq !== undefined;
         const messages = await db.sessionMessage.findMany({
-            where: { sessionId, seq: { gt: after_seq } },
-            orderBy: { seq: 'asc' },
+            where: isBackward
+                ? { sessionId, seq: { lt: before_seq } }
+                : { sessionId, seq: { gt: after_seq ?? 0 } },
+            orderBy: { seq: isBackward ? 'desc' : 'asc' },
             take: limit + 1,
             select: { id: true, seq: true, localId: true, content: true, createdAt: true, updatedAt: true }
         });
