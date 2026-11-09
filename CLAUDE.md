@@ -356,6 +356,10 @@ docker compose logs -f happy-server
 docker compose down
 ```
 
+**Images are built locally, so a deleted tag cannot be pulled back.** On Monday, 2026-11-09 `docker ps` showed `happy-server-happy-server-1` on a bare ID (`10d8942e3c97`) instead of a tag. The container itself was correct. Its `happy-server:upstream-41cdc0a` tag had been deleted from the image store, and the container ran only on the snapshot it still held. A recreate would have failed. Fix: `./build-upstream.sh` (same pin, ~3 min, does not touch the running container), then `docker image inspect happy-server:upstream-<short>` to confirm. The container was then recreated onto the rebuilt tag ("No pending migrations to apply").
+- ⚠️ **Any `happy-server-happy-server:latest` is the old fork, not the current server.** That name came from the fork's `build: .` compose and pointed at the same image as `happy-server:fork-38f4b94`. It was untagged on 2026-11-09. Never point compose at `:latest`. The tell is a bare ID in `docker ps`, which means a missing tag; the fix is a rebuild, never a retag.
+- ⚠️ **`docker image prune -a` deletes the rollback image.** `happy-server:fork-38f4b94` is used by no container, so a host-wide prune removes it. If that happens, rebuild it from `fork-final` (see below).
+
 **Never run migrations yourself.** Migrations are a human responsibility. Because `migrate deploy` is in the start command, a new image with new migrations counts as one. Back up first:
 
 ```bash
